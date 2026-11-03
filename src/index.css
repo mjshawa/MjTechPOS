@@ -1,0 +1,49 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Dark (default) = standard Tailwind slate */
+:root {
+  --s-50: 248 250 252; --s-100: 241 245 249; --s-200: 226 232 240; --s-300: 203 213 225; --s-400: 148 163 184;
+  --s-500: 100 116 139; --s-600: 71 85 105; --s-700: 51 65 85; --s-800: 30 41 59; --s-900: 15 23 42; --s-950: 2 6 23;
+  color-scheme: dark;
+}
+/* Light = the same scale reversed (page = light grey, cards = white, text = dark) */
+[data-theme='light'] {
+  --s-50: 2 6 23; --s-100: 15 23 42; --s-200: 30 41 59; --s-300: 51 65 85; --s-400: 71 85 105;
+  --s-500: 100 116 139; --s-600: 148 163 184; --s-700: 203 213 225; --s-800: 226 232 240; --s-900: 255 255 255; --s-950: 241 245 249;
+  color-scheme: light;
+}
+/* Dark text on bright accent buttons stays dark; bright accent text gets a darker shade on white */
+[data-theme='light'] .text-slate-950, [data-theme='light'] .hover\:text-slate-950:hover { color: #0f172a; }
+[data-theme='light'] .text-amber-400 { color: #b45309; }   [data-theme='light'] .text-emerald-400 { color: #047857; }
+[data-theme='light'] .text-rose-400 { color: #be123c; }    [data-theme='light'] .text-indigo-400 { color: #4338ca; }
+[data-theme='light'] .text-sky-400 { color: #0369a1; }     [data-theme='light'] .text-violet-400 { color: #6d28d9; }
+[data-theme='light'] .text-cyan-400 { color: #0e7490; }    [data-theme='light'] .text-orange-400 { color: #c2410c; }
+[data-theme='light'] .text-yellow-400 { color: #a16207; }  [data-theme='light'] .text-red-400 { color: #b91c1c; }
+[data-theme='light'] .text-green-400 { color: #15803d; }   [data-theme='light'] .text-blue-400 { color: #1d4ed8; }
+
+html, body, #root { height: 100%; margin: 0; }
+body { background: rgb(var(--s-950)); }
+.scrollbar-none { scrollbar-width: none; }
+.scrollbar-none::-webkit-scrollbar { display: none; }
+
+/* ---------- Responsive foundations ---------- */
+/* Use the *visible* viewport on phones (address bar / on-screen keyboard), falls back to vh on old browsers */
+@supports (height: 100dvh) {
+  .h-screen { height: 100dvh; }
+  .min-h-screen { min-height: 100dvh; }
+  .max-h-\[94vh\] { max-height: 94dvh; }
+  .max-h-\[92vh\] { max-height: 92dvh; }
+  .max-h-\[85vh\] { max-height: 85dvh; }
+}
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+body { overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
+button, [role='button'], select { touch-action: manipulation; }
+img, svg, video { max-width: 100%; }
+/* iOS Safari zooms the page when a focused field is under 16px; stop that on touch screens */
+@media (max-width: 767px) {
+  input, select, textarea { font-size: 16px !important; }
+}
+/* Never let a wide table or long word push the page sideways */
+table { max-width: 100%; }
