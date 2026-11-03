@@ -5,7 +5,7 @@
  */
 const { execSync } = require('child_process');
 
-const hosts = ['NETLIFY', 'VERCEL', 'CF_PAGES', 'RENDER', 'AWS_AMPLIFY', 'DEPLOY_PRIME_URL'];
+const hosts = ['NETLIFY', 'VERCEL', 'CF_PAGES', 'RENDER', 'AWS_AMPLIFY', 'DEPLOY_PRIME_URL', 'WORKERS_CI'];
 const host = hosts.find(k => process.env[k]);
 if (host) {
   console.log(`[postinstall] website host detected (${host}): skipping Electron native setup`);
