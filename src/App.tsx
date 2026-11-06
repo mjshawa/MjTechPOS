@@ -31,7 +31,6 @@ import {
   Layers,
   Sparkles,
   Zap,
-  MoreHorizontal,
   Filter,
   ClipboardList,
   Lock,
@@ -40,7 +39,8 @@ import {
   FileText,
   Wallet,
   RotateCcw,
-  Store
+  Store,
+  MessageCircle
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -71,7 +71,7 @@ import { ProductThumb, PhotoPicker } from './ProductPhoto';
 import QtyInput from './QtyInput';
 import ItemEditModal from './ItemEditModal';
 import { downloadExcel } from './exportExcel';
-import { printHtml, buildEodReportHtml, buildReceiptHtml, sampleReceipt } from './printReport';
+import { printHtml, buildEodReportHtml, buildReceiptHtml, sampleReceipt, buildReceiptText, normalizeWhatsAppNumber, whatsAppLink } from './printReport';
 
 // ============================ CONFIG ============================
 const CURRENCY = 'K';          // Zambian Kwacha
@@ -107,30 +107,7 @@ const cardGrid = (min: number, gap = 16): React.CSSProperties => ({
   gap,
 });
 
-
-// Sidebar / bottom-bar navigation. `short` is the label used in the phone bottom bar.
-const NAV_ITEMS = [
-  { id: 'pos', label: 'Terminal', short: 'Terminal', icon: ShoppingBag, owner: false },
-  { id: 'tabs', label: 'Open Bar Tabs', short: 'Tabs', icon: Users, owner: false },
-  { id: 'sales', label: 'Sales & Refunds', short: 'Sales', icon: RotateCcw, owner: false },
-  { id: 'inventory', label: 'Stock Tracking', short: 'Stock', icon: Package, owner: false },
-  { id: 'expenses', label: 'Expenses', short: 'Expenses', icon: Wallet, owner: false },
-  { id: 'eod', label: 'End of Day (EOD)', short: 'EOD', icon: ClipboardList, owner: true },
-  { id: 'calendar', label: 'Calendar', short: 'Calendar', icon: CalendarDays, owner: false },
-  { id: 'analytics', label: 'Analytics & COGS', short: 'Analytics', icon: BarChart3, owner: true },
-];
-
-/** One tappable row in the phone "More" sheet. */
-function MoreRow({ icon: Icon, label, onClick, disabled }: any) {
-  return (
-    <button onClick={onClick} disabled={disabled}
-      className="w-full flex items-center gap-3 px-4 py-3.5 rounded-xl bg-slate-800/50 hover:bg-slate-800 text-slate-200 text-sm font-semibold disabled:opacity-60">
-      <Icon className="h-5 w-5 shrink-0 text-slate-400" /> {label}
-    </button>
-  );
-}
-
-// --- NO STARTER ITEMS: the shop starts empty (zero items, zero stock). The owner adds items and stock in Stock Tracking. ---
+// --- STARTER ITEMS: none. A new device starts with an empty catalogue; the owner adds items in Stock Tracking > Add New Item. ---
 const INITIAL_PRODUCTS: any[] = [];
 
 const SEED_ORDER = INITIAL_PRODUCTS.map(p => p.id);
@@ -190,10 +167,6 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
   const WS_LABEL = workspace === 'retail' ? 'Wholesale' : 'Bar'; // internal id stays 'retail' so saved data and Supabase store ids keep working
   const storeId = `${STORE_ID}-${workspace}`;
   const isWide = useMediaQuery('(min-width: 1024px)'); // sidebar expanded (labels + 256px)
-  const isPhone = useMediaQuery('(max-width: 767px)'); // sidebar becomes a bottom bar
-  const isDocked = useMediaQuery('(min-width: 900px)'); // order panel sits beside the catalogue; below this it slides over
-  const [cartOpen, setCartOpen] = useState(false);
-  const [showMore, setShowMore] = useState(false);
   // Navigation State
   const [activeTab, setActiveTab] = useState('pos'); // 'pos', 'tabs', 'inventory', 'eod', 'analytics'
   const [mode, setMode] = useState(WS); // fixed to this workspace
@@ -229,6 +202,9 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
   const [isPreAuthOpen, setIsPreAuthOpen] = useState(false);
   const [isItemModalOpen, setIsItemModalOpen] = useState(false);
   const [currentReceipt, setCurrentReceipt] = useState(null);
+  const [waOpen, setWaOpen] = useState(false);   // WhatsApp number box on the receipt
+  const [waPhone, setWaPhone] = useState('');
+  const [waError, setWaError] = useState('');
 
   // EOD State
   const [physicalCounts, setPhysicalCounts] = usePersistentState(`${workspace}:physicalCounts`, {});
@@ -410,7 +386,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
 
   // ---------- REFUNDS ----------
   const handleRefund = ({ sale, lines, method, reason }: { sale: any; lines: any[]; method: string; reason: string }) => {
-    if (isEodLocked) return; // owner AND staff can refund, but only while the shift is open
+    if (!isOwner || isEodLocked) return;
     const factor = refundFactor(sale);
     const catOf = new Map<string, string>(products.map((p: any) => [p.id, p.category]));
     let amount = 0, bar = 0, retail = 0;
@@ -446,6 +422,16 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
   const [showDeleted, setShowDeleted] = useState(false);
   // The CLIENT's business details, typed by the owner (saved on this device). The product name stays MjTech Point Of Sale.
   const business = useMemo(() => withDefaults(businessRaw), [businessRaw]); // older saved settings lack the newer receipt options
+
+  /** Open WhatsApp with the receipt typed out, addressed to the number the cashier entered. */
+  const sendReceiptWhatsApp = () => {
+    const r: any = currentReceipt;
+    if (!r) return;
+    const digits = normalizeWhatsAppNumber(waPhone);
+    if (!digits) { setWaError('Enter a valid phone number, e.g. 0977123456'); return; }
+    const text = buildReceiptText({ ...r, business, businessName: bizName || BRAND.product, footer: business.footer, product: BRAND.product, taxPct: Math.round(TAX_RATE * 100), money });
+    window.open(whatsAppLink(digits, text), '_blank', 'noopener');
+  };
   const [showBusiness, setShowBusiness] = useState(false);
   const bizName = (business?.name || '').trim();
   useEffect(() => { document.title = bizName ? `${bizName} · ${BRAND.product}` : BRAND.product; }, [bizName]);
@@ -1001,11 +987,10 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
   }, [scopedProducts, mode, selectedSubcat, searchQuery]);
 
   return (
-    <div className={'flex h-screen bg-slate-950 text-slate-100 font-sans overflow-hidden select-none ' + (isPhone ? 'flex-col' : '')}
-         style={{ paddingTop: 'env(safe-area-inset-top)', paddingLeft: 'env(safe-area-inset-left)', paddingRight: 'env(safe-area-inset-right)' }}>
+    <div className="flex h-screen bg-slate-950 text-slate-100 font-sans overflow-hidden select-none">
       
       {/* LEFT NAVIGATION BAR */}
-      {!isPhone && <aside style={{ width: isWide ? 256 : 80 }} className="shrink-0 overflow-hidden bg-slate-900 border-r border-slate-800 flex flex-col gap-3 p-4 z-20">
+      <aside style={{ width: isWide ? 256 : 80 }} className="shrink-0 overflow-hidden bg-slate-900 border-r border-slate-800 flex flex-col gap-3 p-4 z-20">
         {/* Logo + menu scroll when the screen is short, so the user block and Sign out below are ALWAYS visible */}
         <div className="space-y-6 flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
           {/* Logo / Title */}
@@ -1030,7 +1015,16 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
 
           {/* Nav Buttons (owner sees everything, staff sees Terminal + Tabs) */}
           <nav className="space-y-1.5">
-            {NAV_ITEMS.filter(i => !i.owner || isOwner).map(item => (
+            {[
+              { id: 'pos', label: 'Terminal', icon: ShoppingBag, owner: false },
+              { id: 'tabs', label: 'Open Bar Tabs', icon: Users, owner: false },
+              { id: 'sales', label: 'Sales & Refunds', icon: RotateCcw, owner: false },
+              { id: 'inventory', label: 'Stock Tracking', icon: Package, owner: false },
+              { id: 'expenses', label: 'Expenses', icon: Wallet, owner: false },
+              { id: 'eod', label: 'End of Day (EOD)', icon: ClipboardList, owner: true },
+              { id: 'calendar', label: 'Calendar', icon: CalendarDays, owner: false },
+              { id: 'analytics', label: 'Analytics & COGS', icon: BarChart3, owner: true },
+            ].filter(i => !i.owner || isOwner).map(item => (
               <button
                 key={item.id}
                 onClick={() => setActiveTab(item.id)}
@@ -1122,7 +1116,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
             <button onClick={handleResetAllData} className="text-[10px] text-slate-600 hover:text-rose-400 underline">Clear saved data</button>
           )}
         </div>
-      </aside>}
+      </aside>
 
       {/* MAIN VIEW AREA */}
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden bg-slate-950">
@@ -1131,10 +1125,10 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
         {activeTab === 'pos' && (
           <div className="flex-1 flex overflow-hidden">
             {/* Catalog Section */}
-            <div className="flex-1 min-w-0 flex flex-col p-3 sm:p-4 lg:p-6 overflow-hidden border-r border-slate-800">
+            <div className="flex-1 min-w-0 flex flex-col p-4 lg:p-6 overflow-hidden border-r border-slate-800">
               
               {/* Header Controls: Mode Switcher & Search */}
-              <div className="flex flex-col md:flex-row gap-3 md:gap-4 justify-between items-center mb-4 md:mb-6">
+              <div className="flex flex-col md:flex-row gap-4 justify-between items-center mb-6">
                 
                 {/* Mode Selector (replaced by a label when this device is dedicated to Bar or Retail) */}
                 {scope === 'Both' ? (
@@ -1214,7 +1208,12 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
               </div>
 
               {/* Product Grid */}
-              <div style={{ display: 'grid', gridTemplateColumns: `repeat(auto-fill, minmax(${isPhone ? 148 : 210}px, 1fr))`, gap: isPhone ? 10 : 16, alignContent: 'start' }} className="flex-1 overflow-y-auto pr-1">
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: 16, alignContent: 'start' }} className="flex-1 overflow-y-auto pr-1">
+                {scopedProducts.length === 0 && (
+                  <div style={{ gridColumn: '1 / -1' }} className="text-center text-slate-500 text-sm py-16">
+                    No items yet.{isOwner ? ' Go to Stock Tracking and tap Add New Item to start.' : ' Ask the owner to add items in Stock Tracking.'}
+                  </div>
+                )}
                 {filteredProducts.map(product => {
                   const isLowStock = product.stock <= product.minThreshold && product.stock > 0;
                   const isOutOfStock = product.stock <= 0;
@@ -1222,11 +1221,11 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                   return (
                     <div
                       key={product.id}
-                      className="bg-slate-900 border border-slate-800 rounded-2xl p-3 sm:p-4 flex flex-col justify-between hover:border-slate-700 transition-all group"
+                      className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-col justify-between hover:border-slate-700 transition-all group"
                     >
                       <div>
                         <div className="flex justify-between items-start gap-2 mb-2">
-                          <ProductThumb product={product} size={isPhone ? 56 : 84} />
+                          <ProductThumb product={product} size={84} />
                           
                           {/* Stock Status Pill */}
                           <span className={`min-w-0 text-center leading-tight text-[10px] font-bold px-2 py-0.5 rounded-full ${
@@ -1310,16 +1309,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
             </div>
 
             {/* ORDER TICKET DRAWER */}
-            {!isDocked && cartOpen && <div onClick={() => setCartOpen(false)} className="fixed inset-0 z-30 bg-slate-950/70 backdrop-blur-sm" />}
-            <div
-              className={isDocked
-                ? 'shrink-0 w-80 lg:w-96 bg-slate-900 flex flex-col border-l border-slate-800'
-                : 'fixed top-0 bottom-0 right-0 z-40 w-full sm:w-96 max-w-full bg-slate-900 flex flex-col border-l border-slate-800 shadow-2xl ' + (cartOpen ? 'translate-x-0' : 'translate-x-full')}
-              style={isDocked ? undefined : {
-                paddingTop: 'env(safe-area-inset-top)',
-                visibility: cartOpen ? 'visible' : 'hidden',
-                transition: 'transform .2s ease, visibility 0s linear ' + (cartOpen ? '0s' : '.2s'),
-              }}>
+            <div className="shrink-0 w-80 lg:w-96 bg-slate-900 flex flex-col border-l border-slate-800">
               <div className="p-4 border-b border-slate-800 flex items-center justify-between">
                 <div>
                   <h2 className="font-bold text-slate-100 text-base flex items-center gap-2">
@@ -1327,21 +1317,14 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                   </h2>
                   <p className="text-xs text-slate-500">Items to pay for now or keep on a tab</p>
                 </div>
-                <div className="flex items-center gap-3">
-                  {cart.length > 0 && (
-                    <button
-                      onClick={() => setCart([])}
-                      className="text-xs text-rose-400 hover:text-rose-300 font-semibold"
-                    >
-                      Clear All
-                    </button>
-                  )}
-                  {!isDocked && (
-                    <button onClick={() => setCartOpen(false)} aria-label="Close order" className="p-2 -mr-2 rounded-lg text-slate-400 hover:bg-slate-800">
-                      <X className="h-5 w-5" />
-                    </button>
-                  )}
-                </div>
+                {cart.length > 0 && (
+                  <button
+                    onClick={() => setCart([])}
+                    className="text-xs text-rose-400 hover:text-rose-300 font-semibold"
+                  >
+                    Clear All
+                  </button>
+                )}
               </div>
 
               {/* Customer Name Input */}
@@ -1366,8 +1349,8 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                 ) : (
                   cart.map(item => (
                     <div key={item.cartId} className="bg-slate-950/80 border border-slate-800/80 rounded-xl p-3 flex items-center justify-between">
-                      <div className="flex-1 min-w-0 pr-2">
-                        <h4 className="text-xs font-bold text-slate-200 break-words">{item.name}</h4>
+                      <div className="flex-1 pr-2">
+                        <h4 className="text-xs font-bold text-slate-200">{item.name}</h4>
                         {item.selectedVariant && (item.pack || 'single') === 'single' && (
                           <span className="text-[10px] text-amber-400 bg-amber-500/10 px-1 py-0.5 rounded">
                             {item.selectedVariant}
@@ -1391,23 +1374,23 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                         <div className="flex items-center bg-slate-900 border border-slate-800 rounded-lg">
                           <button
                             onClick={() => updateQty(item.cartId, -1)}
-                            className="p-2 sm:p-1 hover:text-amber-400 text-slate-400"
+                            className="p-1 hover:text-amber-400 text-slate-400"
                           >
                             <Minus className="h-3 w-3" />
                           </button>
                           <QtyInput value={item.qty} max={maxFor(item)} onCommit={n => setCartQty(item.cartId, n)} />
                           <button
                             onClick={() => updateQty(item.cartId, 1)}
-                            className="p-2 sm:p-1 hover:text-amber-400 text-slate-400"
+                            className="p-1 hover:text-amber-400 text-slate-400"
                           >
                             <Plus className="h-3 w-3" />
                           </button>
                         </div>
                         <button
                           onClick={() => removeFromCart(item.cartId)}
-                          className="p-1.5 text-slate-600 hover:text-rose-400"
+                          className="text-slate-600 hover:text-rose-400"
                         >
-                          <Trash2 className="h-4 w-4" />
+                          <Trash2 className="h-3.5 w-3.5" />
                         </button>
                       </div>
                     </div>
@@ -1416,7 +1399,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
               </div>
 
               {/* Summary & Checkout Footer */}
-              <div className="p-4 border-t border-slate-800 bg-slate-950/80 space-y-3" style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }}>
+              <div className="p-4 border-t border-slate-800 bg-slate-950/80 space-y-3">
                 <div className="space-y-1.5 text-xs">
                   <div className="flex justify-between text-slate-400">
                     <span>Subtotal</span>
@@ -1471,33 +1454,14 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                 </div>
               </div>
             </div>
-
-            {!isDocked && !cartOpen && (
-              <button
-                onClick={() => setCartOpen(true)}
-                aria-label="Open current order"
-                className="fixed z-20 flex items-center gap-3 pl-4 pr-5 py-3 rounded-full bg-gradient-to-r from-amber-500 to-amber-600 text-slate-950 font-extrabold text-sm shadow-xl shadow-amber-500/30"
-                style={{ right: 16, bottom: isPhone ? 'calc(76px + env(safe-area-inset-bottom))' : 20 }}
-              >
-                <span className="relative">
-                  <ShoppingBag className="h-5 w-5" />
-                  {cart.length > 0 && (
-                    <span className="absolute -top-2 -right-2 min-w-[18px] h-[18px] px-1 rounded-full bg-slate-950 text-amber-400 text-[10px] flex items-center justify-center">
-                      {cart.reduce((n: number, i: any) => n + (Number(i.qty) || 0), 0)}
-                    </span>
-                  )}
-                </span>
-                <span className="font-mono">{money(grandTotal)}</span>
-              </button>
-            )}
           </div>
         )}
 
         {/* VIEW 2: OPEN TABS MANAGEMENT */}
         {activeTab === 'tabs' && (
-          <div className="flex-1 p-3 sm:p-4 lg:p-6 overflow-y-auto">
+          <div className="flex-1 p-6 overflow-y-auto">
             <div className="max-w-6xl mx-auto space-y-6">
-              <div className="flex flex-wrap gap-3 justify-between items-center">
+              <div className="flex justify-between items-center">
                 <div>
                   <h2 className="text-2xl font-extrabold text-slate-100">Open Tabs</h2>
                   <p className="text-sm text-slate-400">Customers who have not paid yet. Take their payment here.</p>
@@ -1577,10 +1541,10 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
 
         {/* VIEW 3: DETAILED INVENTORY & DAILY STOCK TRACKING */}
         {activeTab === 'inventory' && (
-          <div className="flex-1 p-3 sm:p-4 lg:p-6 overflow-y-auto">
+          <div className="flex-1 p-6 overflow-y-auto">
             <div className="max-w-6xl mx-auto space-y-6">
               
-              <div className="flex flex-wrap gap-3 justify-between items-center">
+              <div className="flex justify-between items-center">
                 <div>
                   <h2 className="text-2xl font-extrabold text-slate-100">Daily Stock</h2>
                   <p className="text-sm text-slate-400">The stock you started with, what you sold today, what is left, and how much money it can bring.</p>
@@ -1726,7 +1690,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
 
         {/* VIEW 4: END OF DAY (EOD) RECONCILIATION */}
         {activeTab === 'eod' && (
-          <div className="flex-1 p-3 sm:p-4 lg:p-6 overflow-y-auto">
+          <div className="flex-1 p-6 overflow-y-auto">
             <div className="max-w-6xl mx-auto space-y-6">
               
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -1980,7 +1944,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
 
         {/* VIEW 5: ANALYTICS & REVENUE */}
         {activeTab === 'analytics' && (
-          <div className="flex-1 p-3 sm:p-4 lg:p-6 overflow-y-auto">
+          <div className="flex-1 p-6 overflow-y-auto">
             <div className="max-w-6xl mx-auto space-y-6">
               
               <div className="flex flex-wrap items-start justify-between gap-3">
@@ -2108,71 +2072,13 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
 
       </main>
 
-      {/* PHONE BOTTOM BAR (replaces the sidebar below 768px) */}
-      {isPhone && (
-        <nav className="shrink-0 z-20 bg-slate-900 border-t border-slate-800 flex items-stretch" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
-          <div className="flex-1 min-w-0 flex overflow-x-auto scrollbar-none">
-            {NAV_ITEMS.filter(i => !i.owner || isOwner).map(item => (
-              <button
-                key={item.id}
-                onClick={() => setActiveTab(item.id)}
-                aria-label={item.label}
-                className={`relative shrink-0 min-w-[70px] flex-1 flex flex-col items-center justify-center gap-0.5 pt-2 pb-1.5 text-[10px] font-semibold border-t-2 ${
-                  activeTab === item.id ? 'text-amber-400 border-amber-500' : 'text-slate-400 border-transparent'
-                }`}
-              >
-                <item.icon className="h-5 w-5" />
-                <span>{item.short}</span>
-                {item.id === 'tabs' && openTabs.length > 0 && (
-                  <span className="absolute top-1 right-3 min-w-[16px] h-4 px-1 rounded-full bg-amber-500 text-slate-950 text-[10px] font-bold flex items-center justify-center">{openTabs.length}</span>
-                )}
-              </button>
-            ))}
-          </div>
-          <button onClick={() => setShowMore(true)} aria-label="More"
-            className="shrink-0 w-[68px] border-l border-slate-800 flex flex-col items-center justify-center gap-0.5 text-[10px] font-semibold text-slate-400">
-            <MoreHorizontal className="h-5 w-5" />
-            <span>More</span>
-          </button>
-        </nav>
-      )}
-
-      {isPhone && showMore && (
-        <div className="fixed inset-0 z-50 flex items-end bg-slate-950/70 backdrop-blur-sm" onClick={() => setShowMore(false)}>
-          <div onClick={e => e.stopPropagation()}
-            className="w-full bg-slate-900 border-t border-slate-800 rounded-t-3xl p-4 space-y-2.5 max-h-[85vh] overflow-y-auto"
-            style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }}>
-            <div className="flex items-center gap-3 px-1 pb-2">
-              <div className="w-10 h-10 shrink-0 rounded-full bg-slate-800 flex items-center justify-center font-bold text-sm text-amber-400 border border-slate-700">
-                {(user.name || '?').slice(0, 2).toUpperCase()}
-              </div>
-              <div className="min-w-0 flex-1 text-xs">
-                <p className="font-bold text-slate-200 text-sm truncate">{user.name}</p>
-                <p className="text-slate-500 capitalize">{user.role} · {isEodLocked ? 'Shift closed' : 'Shift open'} · {WS_LABEL}</p>
-                {isOwner && <p className="text-amber-400 font-mono">24h: {money(rolling24h)}</p>}
-              </div>
-              <button onClick={() => setShowMore(false)} aria-label="Close" className="p-2 rounded-lg text-slate-400 hover:bg-slate-800"><X className="h-5 w-5" /></button>
-            </div>
-            <MoreRow icon={RefreshCw} label={`Cloud Sync · ${sync.label}`} onClick={() => { setShowMore(false); setShowSync(true); }} />
-            {isOwner && <MoreRow icon={Store} label="Business details" onClick={() => { setShowMore(false); setShowBusiness(true); }} />}
-            {isOwner && <MoreRow icon={Download} label={exporting ? 'Preparing Excel…' : 'Download Excel'} disabled={exporting} onClick={() => { setShowMore(false); handleExportExcel(); }} />}
-            {isOwner && <MoreRow icon={UserCog} label="Team" onClick={() => { setShowMore(false); setShowTeam(true); }} />}
-            <MoreRow icon={theme === 'dark' ? Sun : Moon} label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'} onClick={onToggleTheme} />
-            <MoreRow icon={LogOut} label="Sign out" onClick={() => { setShowMore(false); auth.logout(); }} />
-            {isOwner && (
-              <button onClick={() => { setShowMore(false); handleResetAllData(); }} className="w-full pt-2 text-[11px] text-slate-600 hover:text-rose-400 underline">Clear saved data</button>
-            )}
-          </div>
-        </div>
-      )}
-
       {/* --- MODALS --- */}
 
       {editItem && isOwner && <ItemEditModal item={editItem} currency={CURRENCY} onSave={handleSaveEdit} onClose={() => setEditItem(null)} />}
 
       {restockItem && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <form onSubmit={handleRestock} className="bg-slate-900 border border-slate-800 rounded-3xl max-w-sm w-full p-4 sm:p-6 space-y-4 shadow-2xl text-slate-200 max-h-[94vh] overflow-y-auto">
+          <form onSubmit={handleRestock} className="bg-slate-900 border border-slate-800 rounded-3xl max-w-sm w-full p-6 space-y-4 shadow-2xl text-slate-200">
             <div className="flex justify-between items-start">
               <div>
                 <h3 className="text-xl font-extrabold">Receive Stock</h3>
@@ -2225,7 +2131,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
       {/* 1. EOD PRINTABLE SUMMARY MODAL */}
       {eodSummaryModal && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-2xl w-full p-4 sm:p-6 space-y-6 shadow-2xl max-h-[94vh] overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-2xl w-full p-6 space-y-6 shadow-2xl">
             
             <div className="flex justify-between items-center pb-4 border-b border-slate-800">
               <div>
@@ -2319,7 +2225,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
       {/* 2. CHECKOUT MODAL */}
       {isCheckoutOpen && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-md w-full p-4 sm:p-6 space-y-5 shadow-2xl max-h-[94vh] overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-md w-full p-6 space-y-5 shadow-2xl max-h-[94vh] overflow-y-auto">
             
             <div className="flex justify-between items-center">
               <h3 className="text-xl font-extrabold text-slate-100">Take Payment</h3>
@@ -2440,7 +2346,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
       {/* 3. PRE-AUTH TAB MODAL */}
       {isPreAuthOpen && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-md w-full p-4 sm:p-6 space-y-6 shadow-2xl max-h-[94vh] overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-md w-full p-6 space-y-6 shadow-2xl">
             
             <div className="flex justify-between items-center">
               <h3 className="text-xl font-extrabold text-slate-100">Open a Tab</h3>
@@ -2504,7 +2410,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
       {/* 4. NEW ITEM INVENTORY MODAL */}
       {isItemModalOpen && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <form onSubmit={handleSaveNewItem} className="bg-slate-900 border border-slate-800 rounded-3xl max-w-md w-full p-4 sm:p-6 space-y-4 shadow-2xl max-h-[94vh] overflow-y-auto">
+          <form onSubmit={handleSaveNewItem} className="bg-slate-900 border border-slate-800 rounded-3xl max-w-md w-full p-6 space-y-4 shadow-2xl max-h-[94vh] overflow-y-auto">
             
             <div className="flex justify-between items-center">
               <h3 className="text-xl font-extrabold text-slate-100">Add New Item</h3>
@@ -2648,7 +2554,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
       {/* 5. DIGITAL RECEIPT MODAL */}
       {currentReceipt && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-sm w-full p-4 sm:p-6 space-y-4 shadow-2xl max-h-[94vh] overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-sm w-full p-6 space-y-4 shadow-2xl">
             
             <div className="text-center space-y-1 pb-3 border-b border-slate-800">
               <h3 className="font-extrabold text-lg text-slate-100">{bizName || BRAND.product}</h3>
@@ -2687,6 +2593,22 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
               )}
             </div>
 
+            {waOpen && (
+              <div className="space-y-1.5">
+                <div className="flex gap-2">
+                  <input
+                    autoFocus type="tel" inputMode="tel" value={waPhone}
+                    onChange={e => { setWaPhone(e.target.value); setWaError(''); }}
+                    onKeyDown={e => { if (e.key === 'Enter') sendReceiptWhatsApp(); }}
+                    placeholder="Customer WhatsApp e.g. 0977123456"
+                    className="flex-1 min-w-0 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none focus:border-emerald-500"
+                  />
+                  <button onClick={sendReceiptWhatsApp} className="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl">Send</button>
+                </div>
+                {waError && <p className="text-[11px] text-rose-400">{waError}</p>}
+              </div>
+            )}
+
             <div className="flex gap-2 pt-2">
               <button
                 onClick={() => printHtml(buildReceiptHtml({ ...currentReceipt, business, businessName: bizName || BRAND.product, footer: business.footer, product: BRAND.product, tax: currentReceipt.tax, taxPct: Math.round(TAX_RATE * 100), money }))}
@@ -2695,7 +2617,13 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                 <Printer className="h-4 w-4" /> Print
               </button>
               <button
-                onClick={() => setCurrentReceipt(null)}
+                onClick={() => { setWaOpen(o => !o); setWaError(''); }}
+                className="flex-1 py-2.5 bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-600/40 text-emerald-300 font-bold text-xs rounded-xl flex items-center justify-center gap-1.5"
+              >
+                <MessageCircle className="h-4 w-4" /> WhatsApp
+              </button>
+              <button
+                onClick={() => { setCurrentReceipt(null); setWaOpen(false); setWaPhone(''); setWaError(''); }}
                 className="flex-1 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-xl"
               >
                 Done

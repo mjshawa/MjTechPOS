@@ -180,3 +180,42 @@ export function sampleReceipt(b: BusinessInfo, money: (n: any) => string, produc
     customer: 'Walk-In Guest', cashier: 'Test', business: b, businessName: b.name || product, footer: b.footer, product, money,
   };
 }
+
+
+/** Plain-text receipt for WhatsApp (uses *bold* markup that WhatsApp understands). */
+export function buildReceiptText(r: any) {
+  const b: BusinessInfo = { ...EMPTY_BUSINESS, ...(r.business || {}) };
+  const m = r.money as (n: any) => string;
+  const L: string[] = [];
+  L.push(`*${r.businessName || r.product || 'Receipt'}*`);
+  const contact = [b.address, b.phone, b.tpin ? `TPIN ${b.tpin}` : ''].filter(Boolean).join(' · ');
+  if (contact) L.push(contact);
+  L.push(`Receipt #${r.txId}`);
+  L.push(`${r.date} ${r.timestamp || ''}`.trim());
+  if (r.customer && r.customer !== 'Walk-In Guest') L.push(`Customer: ${r.customer}`);
+  L.push('--------------------------');
+  for (const i of r.items || []) {
+    L.push(`${i.qty}x ${i.name}${i.variant ? ` (${i.variant})` : ''} - ${m(i.price * i.qty)}`);
+  }
+  L.push('--------------------------');
+  L.push(`Subtotal: ${m(r.subtotal)}`);
+  if (r.discountAmount) L.push(`Discount: -${m(r.discountAmount)}`);
+  if (r.tax) L.push(`Tax (${r.taxPct ?? 0}%): ${m(r.tax)}`);
+  L.push(`*Total paid (${r.paymentMethod}): ${m(r.grandTotal)}*`);
+  if (r.tendered != null) { L.push(`Cash received: ${m(r.tendered)}`); L.push(`Change: ${m(r.change)}`); }
+  if (r.footer) { L.push(''); L.push(r.footer); }
+  return L.join('\n');
+}
+
+/** Turn what a cashier types (097..., +260 97..., 26097...) into digits wa.me accepts. Returns '' if it looks wrong. */
+export function normalizeWhatsAppNumber(input: string, countryCode = '260') {
+  let d = String(input || '').replace(/\D/g, '');
+  if (d.startsWith('00')) d = d.slice(2);
+  else if (d.startsWith('0')) d = countryCode + d.slice(1);
+  else if (!d.startsWith(countryCode) && d.length <= 9) d = countryCode + d;
+  return d.length >= 11 && d.length <= 15 ? d : '';
+}
+
+export function whatsAppLink(phoneDigits: string, text: string) {
+  return `https://wa.me/${phoneDigits}?text=${encodeURIComponent(text)}`;
+}
