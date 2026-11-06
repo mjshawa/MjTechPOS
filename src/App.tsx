@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { 
+  Menu,
   ShoppingBag, 
   Wine, 
   Beer, 
@@ -107,8 +108,28 @@ const cardGrid = (min: number, gap = 16): React.CSSProperties => ({
   gap,
 });
 
-// --- STARTER ITEMS: none. A new device starts with an empty catalogue; the owner adds items in Stock Tracking > Add New Item. ---
-const INITIAL_PRODUCTS: any[] = [];
+// --- STARTER ITEMS (sample items and PLACEHOLDER prices: the owner must change them in the Stock Tracking tab) ---
+const INITIAL_PRODUCTS = [
+  // BAR: sold one bottle at a time. Each size is its own card (Black Label Small / Big, Mosi Small / Big).
+  { id: 'b1', sku: 'BEER-001', name: 'Black Label Small', category: 'Bar', subcategory: 'Beer', price: 35.00, cost: 24.00, startingStock: 48, unitsSold: 0, stock: 48, minThreshold: 12, unit: 'bottles', image: '🍺' },
+  { id: 'b7', sku: 'BEER-007', name: 'Black Label Big', category: 'Bar', subcategory: 'Beer', price: 50.00, cost: 36.00, startingStock: 48, unitsSold: 0, stock: 48, minThreshold: 12, unit: 'bottles', image: '🍺' },
+  { id: 'b2', sku: 'BEER-002', name: 'Castle', category: 'Bar', subcategory: 'Beer', price: 35.00, cost: 24.00, startingStock: 48, unitsSold: 0, stock: 48, minThreshold: 12, unit: 'bottles', image: '🍺' },
+  { id: 'b3', sku: 'BEER-003', name: 'Castle Lite', category: 'Bar', subcategory: 'Beer', price: 38.00, cost: 26.00, startingStock: 48, unitsSold: 0, stock: 48, minThreshold: 12, unit: 'bottles', image: '🍺' },
+  { id: 'b4', sku: 'BEER-004', name: 'Mosi Small', category: 'Bar', subcategory: 'Beer', price: 30.00, cost: 20.00, startingStock: 48, unitsSold: 0, stock: 48, minThreshold: 12, unit: 'bottles', image: '🍺' },
+  { id: 'b5', sku: 'BEER-005', name: 'Mosi Big', category: 'Bar', subcategory: 'Beer', price: 45.00, cost: 32.00, startingStock: 48, unitsSold: 0, stock: 48, minThreshold: 12, unit: 'bottles', image: '🍺' },
+  { id: 'b6', sku: 'BEER-006', name: 'Heineken', category: 'Bar', subcategory: 'Beer', price: 45.00, cost: 32.00, startingStock: 48, unitsSold: 0, stock: 48, minThreshold: 12, unit: 'bottles', image: '🍺' },
+
+  // WHOLESALE (internal category id stays 'Retail'). ONE card per product, stock counted in BOTTLES.
+  // boxQty / boxPrice / boxCost let the till sell it per bottle OR per box; a box takes boxQty bottles out of stock.
+  // Spirits are added the same way (Stock Tracking > Add New Item, fill in the "Sold by the box too" part).
+  { id: 'r1', sku: 'WHOL-001', name: 'Black Label Small', category: 'Retail', subcategory: 'Beer', price: 32.00, cost: 24.00, boxQty: 24, boxPrice: 696.00, boxCost: 552.00, startingStock: 240, unitsSold: 0, stock: 240, minThreshold: 48, unit: 'bottles', image: '🍺' },
+  { id: 'r13', sku: 'WHOL-013', name: 'Black Label Big', category: 'Retail', subcategory: 'Beer', price: 42.00, cost: 32.00, boxQty: 12, boxPrice: 468.00, boxCost: 372.00, startingStock: 120, unitsSold: 0, stock: 120, minThreshold: 24, unit: 'bottles', image: '🍺' },
+  { id: 'r2', sku: 'WHOL-002', name: 'Castle', category: 'Retail', subcategory: 'Beer', price: 32.00, cost: 24.00, boxQty: 24, boxPrice: 696.00, boxCost: 552.00, startingStock: 240, unitsSold: 0, stock: 240, minThreshold: 48, unit: 'bottles', image: '🍺' },
+  { id: 'r3', sku: 'WHOL-003', name: 'Castle Lite', category: 'Retail', subcategory: 'Beer', price: 35.00, cost: 26.00, boxQty: 24, boxPrice: 768.00, boxCost: 600.00, startingStock: 240, unitsSold: 0, stock: 240, minThreshold: 48, unit: 'bottles', image: '🍺' },
+  { id: 'r4', sku: 'WHOL-004', name: 'Mosi Small', category: 'Retail', subcategory: 'Beer', price: 27.00, cost: 20.00, boxQty: 24, boxPrice: 576.00, boxCost: 456.00, startingStock: 240, unitsSold: 0, stock: 240, minThreshold: 48, unit: 'bottles', image: '🍺' },
+  { id: 'r5', sku: 'WHOL-005', name: 'Mosi Big', category: 'Retail', subcategory: 'Beer', price: 42.00, cost: 32.00, boxQty: 12, boxPrice: 468.00, boxCost: 372.00, startingStock: 120, unitsSold: 0, stock: 120, minThreshold: 24, unit: 'bottles', image: '🍺' },
+  { id: 'r6', sku: 'WHOL-006', name: 'Heineken', category: 'Retail', subcategory: 'Beer', price: 42.00, cost: 32.00, boxQty: 24, boxPrice: 936.00, boxCost: 744.00, startingStock: 240, unitsSold: 0, stock: 240, minThreshold: 48, unit: 'bottles', image: '🍺' },
+];
 
 const SEED_ORDER = INITIAL_PRODUCTS.map(p => p.id);
 
@@ -167,6 +188,10 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
   const WS_LABEL = workspace === 'retail' ? 'Wholesale' : 'Bar'; // internal id stays 'retail' so saved data and Supabase store ids keep working
   const storeId = `${STORE_ID}-${workspace}`;
   const isWide = useMediaQuery('(min-width: 1024px)'); // sidebar expanded (labels + 256px)
+  const isPhone = useMediaQuery('(max-width: 767px)'); // phone: top bar + slide-in menu + cart as a bottom sheet
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [showCart, setShowCart] = useState(false);
+  const showLabels = isWide || isPhone;
   // Navigation State
   const [activeTab, setActiveTab] = useState('pos'); // 'pos', 'tabs', 'inventory', 'eod', 'analytics'
   const [mode, setMode] = useState(WS); // fixed to this workspace
@@ -674,6 +699,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
   };
 
   useEffect(() => { if (isCheckoutOpen && cart.length === 0) setIsCheckoutOpen(false); }, [isCheckoutOpen, cart.length]);
+  useEffect(() => { if (cart.length === 0) setShowCart(false); }, [cart.length]);
 
   // Largest count a cart line may have (undefined = no limit known, e.g. an old tab item whose product was removed).
   const maxFor = (item: any) => { const c = capQty(cart, item, stockOf(item.id)); return Number.isFinite(c) ? c : undefined; };
@@ -987,10 +1013,33 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
   }, [scopedProducts, mode, selectedSubcat, searchQuery]);
 
   return (
-    <div className="flex h-screen bg-slate-950 text-slate-100 font-sans overflow-hidden select-none">
+    <div style={{ height: '100dvh' }} className={`flex ${isPhone ? 'flex-col' : ''} bg-slate-950 text-slate-100 font-sans overflow-hidden select-none`}>
+
+      {/* PHONE TOP BAR */}
+      {isPhone && (
+        <header style={{ paddingTop: 'max(0.5rem, env(safe-area-inset-top))' }} className="shrink-0 flex items-center gap-3 px-3 pb-2 bg-slate-900 border-b border-slate-800 z-20">
+          <button onClick={() => setMenuOpen(true)} aria-label="Menu" className="h-10 w-10 flex items-center justify-center rounded-xl bg-slate-800/70 text-slate-200"><Menu className="h-5 w-5" /></button>
+          <div className="flex-1 min-w-0">
+            <p className="font-extrabold text-sm text-slate-100 truncate">{bizName || `${BRAND.lead}${BRAND.tail}`}</p>
+            <p className={`text-[11px] truncate ${sync.failed > 0 ? 'text-rose-400' : sync.pending > 0 ? 'text-amber-400' : 'text-slate-500'}`}>{WS_LABEL} · {sync.label}</p>
+          </div>
+          {activeTab === 'pos' && (
+            <button onClick={() => setShowCart(true)} aria-label="Open order" className="relative h-10 px-3 flex items-center gap-2 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs">
+              <ShoppingBag className="h-4 w-4" />{cart.length > 0 ? money(grandTotal) : 'Order'}
+              {cart.length > 0 && <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] flex items-center justify-center">{cart.reduce((a: number, i: any) => a + i.qty, 0)}</span>}
+            </button>
+          )}
+        </header>
+      )}
+
       
       {/* LEFT NAVIGATION BAR */}
-      <aside style={{ width: isWide ? 256 : 80 }} className="shrink-0 overflow-hidden bg-slate-900 border-r border-slate-800 flex flex-col gap-3 p-4 z-20">
+      {isPhone && menuOpen && <div className="fixed inset-0 bg-slate-950/70 z-30" onClick={() => setMenuOpen(false)} />}
+      <aside
+        style={isPhone
+          ? { width: 'min(288px, 85vw)', position: 'fixed', top: 0, bottom: 0, left: 0, transform: menuOpen ? 'translateX(0)' : 'translateX(-105%)', transition: 'transform .2s ease', paddingTop: 'max(1rem, env(safe-area-inset-top))', paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }
+          : { width: isWide ? 256 : 80 }}
+        className={`shrink-0 overflow-hidden bg-slate-900 border-r border-slate-800 flex flex-col gap-3 p-4 ${isPhone ? 'z-40' : 'z-20'}`}>
         {/* Logo + menu scroll when the screen is short, so the user block and Sign out below are ALWAYS visible */}
         <div className="space-y-6 flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
           {/* Logo / Title */}
@@ -998,7 +1047,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
             <div className="h-10 w-10 rounded-xl bg-gradient-to-tr from-amber-500 to-indigo-600 flex items-center justify-center font-bold text-white shadow-lg shadow-indigo-500/20">
               <Zap className="h-6 w-6" />
             </div>
-            <div className={isWide ? 'block' : 'hidden'}>
+            <div className={showLabels ? 'block' : 'hidden'}>
               {bizName ? (
                 <>
                   <h1 className="font-extrabold text-base leading-tight text-slate-100 max-w-[160px] break-words">{bizName}</h1>
@@ -1027,7 +1076,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
             ].filter(i => !i.owner || isOwner).map(item => (
               <button
                 key={item.id}
-                onClick={() => setActiveTab(item.id)}
+                onClick={() => { setActiveTab(item.id); setMenuOpen(false); }}
                 title={item.label}
                 className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-semibold transition-all ${
                   activeTab === item.id
@@ -1037,50 +1086,50 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
               >
                 <div className="flex items-center gap-3 min-w-0">
                   <item.icon className="h-5 w-5 shrink-0" />
-                  {isWide && <span className="whitespace-nowrap">{item.label}</span>}
+                  {showLabels && <span className="whitespace-nowrap">{item.label}</span>}
                 </div>
-                {item.id === 'tabs' && openTabs.length > 0 && isWide && (
+                {item.id === 'tabs' && openTabs.length > 0 && showLabels && (
                   <span className="px-2 py-0.5 text-xs font-bold rounded-full bg-amber-500 text-slate-950">{openTabs.length}</span>
                 )}
               </button>
             ))}
             <button
-              onClick={() => setShowSync(true)}
+              onClick={() => { setShowSync(true); setMenuOpen(false); }}
               title="Cloud Sync"
               className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-semibold text-slate-400 hover:bg-slate-800/60 hover:text-slate-200 transition-all"
             >
               <RefreshCw className={`h-5 w-5 shrink-0 ${sync.busy ? 'animate-spin' : ''}`} />
-              {isWide && <span className="whitespace-nowrap">Cloud Sync</span>}
+              {showLabels && <span className="whitespace-nowrap">Cloud Sync</span>}
             </button>
             {isOwner && (
               <button
-                onClick={() => setShowBusiness(true)}
+                onClick={() => { setShowBusiness(true); setMenuOpen(false); }}
                 title="Business details"
                 className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-semibold text-slate-400 hover:bg-slate-800/60 hover:text-slate-200 transition-all"
               >
                 <Store className="h-5 w-5 shrink-0" />
-                {isWide && <span className="whitespace-nowrap">Business details</span>}
+                {showLabels && <span className="whitespace-nowrap">Business details</span>}
               </button>
             )}
             {isOwner && (
               <button
-                onClick={handleExportExcel}
+                onClick={() => { handleExportExcel(); setMenuOpen(false); }}
                 disabled={exporting}
                 title="Download everything as an Excel file"
                 className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-semibold text-slate-400 hover:bg-slate-800/60 hover:text-slate-200 transition-all disabled:opacity-60"
               >
                 <Download className={`h-5 w-5 shrink-0 ${exporting ? 'animate-pulse' : ''}`} />
-                {isWide && <span className="whitespace-nowrap">{exporting ? 'Preparing Excel…' : 'Download Excel'}</span>}
+                {showLabels && <span className="whitespace-nowrap">{exporting ? 'Preparing Excel…' : 'Download Excel'}</span>}
               </button>
             )}
             {isOwner && (
               <button
-                onClick={() => setShowTeam(true)}
+                onClick={() => { setShowTeam(true); setMenuOpen(false); }}
                 title="Team"
                 className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-semibold text-slate-400 hover:bg-slate-800/60 hover:text-slate-200 transition-all"
               >
                 <UserCog className="h-5 w-5 shrink-0" />
-                {isWide && <span className="whitespace-nowrap">Team</span>}
+                {showLabels && <span className="whitespace-nowrap">Team</span>}
               </button>
             )}
           </nav>
@@ -1092,7 +1141,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
             <div className="w-8 h-8 shrink-0 rounded-full bg-slate-800 flex items-center justify-center font-bold text-xs text-amber-400 border border-slate-700">
               {(user.name || '?').slice(0, 2).toUpperCase()}
             </div>
-            <div className={(isWide ? 'block' : 'hidden') + ' text-xs min-w-0'}>
+            <div className={(showLabels ? 'block' : 'hidden') + ' text-xs min-w-0'}>
               <p className="font-bold text-slate-200 truncate">{user.name}</p>
               <p className="text-slate-500 capitalize">{user.role} · {isEodLocked ? 'Shift closed' : 'Shift open'}</p>
               <p className="text-slate-500">{WS_LABEL} workspace</p>
@@ -1102,17 +1151,17 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
               </button>
             </div>
           </div>
-          <div className={'flex gap-2 ' + (isWide ? 'flex-row' : 'flex-col')}>
+          <div className={'flex gap-2 ' + (showLabels ? 'flex-row' : 'flex-col')}>
             <button onClick={onToggleTheme} title="Light / dark mode" className="flex-1 flex items-center justify-center gap-2 py-2 rounded-xl bg-slate-800/60 hover:bg-slate-800 text-slate-300 text-xs font-bold">
               {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-              {isWide && (theme === 'dark' ? 'Light' : 'Dark')}
+              {showLabels && (theme === 'dark' ? 'Light' : 'Dark')}
             </button>
             <button onClick={auth.logout} title="Sign out" className="flex-1 flex items-center justify-center gap-2 py-2 rounded-xl bg-slate-800/60 hover:bg-slate-800 text-slate-300 text-xs font-bold">
               <LogOut className="h-4 w-4" />
-              {isWide && 'Sign out'}
+              {showLabels && 'Sign out'}
             </button>
           </div>
-          {isOwner && isWide && (
+          {isOwner && showLabels && (
             <button onClick={handleResetAllData} className="text-[10px] text-slate-600 hover:text-rose-400 underline">Clear saved data</button>
           )}
         </div>
@@ -1123,12 +1172,12 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
         
         {/* VIEW 1: POS TERMINAL */}
         {activeTab === 'pos' && (
-          <div className="flex-1 flex overflow-hidden">
+          <div className="flex-1 flex overflow-hidden relative">
             {/* Catalog Section */}
-            <div className="flex-1 min-w-0 flex flex-col p-4 lg:p-6 overflow-hidden border-r border-slate-800">
+            <div className="flex-1 min-w-0 flex flex-col p-3 md:p-4 lg:p-6 overflow-hidden border-r border-slate-800">
               
               {/* Header Controls: Mode Switcher & Search */}
-              <div className="flex flex-col md:flex-row gap-4 justify-between items-center mb-6">
+              <div className="flex flex-col md:flex-row gap-3 md:gap-4 justify-between items-center mb-3 md:mb-6">
                 
                 {/* Mode Selector (replaced by a label when this device is dedicated to Bar or Retail) */}
                 {scope === 'Both' ? (
@@ -1208,12 +1257,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
               </div>
 
               {/* Product Grid */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: 16, alignContent: 'start' }} className="flex-1 overflow-y-auto pr-1">
-                {scopedProducts.length === 0 && (
-                  <div style={{ gridColumn: '1 / -1' }} className="text-center text-slate-500 text-sm py-16">
-                    No items yet.{isOwner ? ' Go to Stock Tracking and tap Add New Item to start.' : ' Ask the owner to add items in Stock Tracking.'}
-                  </div>
-                )}
+              <div style={{ display: 'grid', gridTemplateColumns: `repeat(auto-fill, minmax(${isPhone ? 150 : 210}px, 1fr))`, gap: isPhone ? 10 : 16, alignContent: 'start', paddingBottom: isPhone ? 76 : 0 }} className="flex-1 overflow-y-auto pr-1">
                 {filteredProducts.map(product => {
                   const isLowStock = product.stock <= product.minThreshold && product.stock > 0;
                   const isOutOfStock = product.stock <= 0;
@@ -1309,7 +1353,21 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
             </div>
 
             {/* ORDER TICKET DRAWER */}
-            <div className="shrink-0 w-80 lg:w-96 bg-slate-900 flex flex-col border-l border-slate-800">
+            {isPhone && !showCart && cart.length > 0 && (
+              <button onClick={() => setShowCart(true)} style={{ bottom: 'max(0.75rem, env(safe-area-inset-bottom))' }} className="fixed left-3 right-3 z-30 flex items-center justify-between px-4 py-3.5 rounded-2xl bg-gradient-to-r from-amber-500 to-amber-600 text-slate-950 font-extrabold shadow-xl shadow-black/40">
+                <span className="flex items-center gap-2 text-sm"><ShoppingBag className="h-4 w-4" />View order · {cart.reduce((a: number, i: any) => a + i.qty, 0)} item(s)</span>
+                <span className="font-mono text-sm">{money(grandTotal)}</span>
+              </button>
+            )}
+            {isPhone && showCart && <div className="fixed inset-0 bg-slate-950/70 z-40" onClick={() => setShowCart(false)} />}
+            <div
+              style={isPhone ? { position: 'fixed', left: 0, right: 0, bottom: 0, height: '88dvh', zIndex: 50, borderTopLeftRadius: 24, borderTopRightRadius: 24, transform: showCart ? 'translateY(0)' : 'translateY(105%)', transition: 'transform .22s ease', paddingBottom: 'env(safe-area-inset-bottom)' } : undefined}
+              className={`${isPhone ? 'bg-slate-900 flex flex-col border-t border-slate-700 shadow-2xl' : 'shrink-0 w-80 lg:w-96 bg-slate-900 flex flex-col border-l border-slate-800'}`}>
+              {isPhone && (
+                <button onClick={() => setShowCart(false)} className="shrink-0 flex flex-col items-center pt-2 pb-1 text-slate-500 text-[11px] font-semibold" aria-label="Close order">
+                  <span className="h-1 w-10 rounded-full bg-slate-700 mb-1" />Close
+                </button>
+              )}
               <div className="p-4 border-b border-slate-800 flex items-center justify-between">
                 <div>
                   <h2 className="font-bold text-slate-100 text-base flex items-center gap-2">
@@ -1459,7 +1517,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
 
         {/* VIEW 2: OPEN TABS MANAGEMENT */}
         {activeTab === 'tabs' && (
-          <div className="flex-1 p-6 overflow-y-auto">
+          <div className="flex-1 p-3 md:p-6 overflow-y-auto">
             <div className="max-w-6xl mx-auto space-y-6">
               <div className="flex justify-between items-center">
                 <div>
@@ -1541,7 +1599,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
 
         {/* VIEW 3: DETAILED INVENTORY & DAILY STOCK TRACKING */}
         {activeTab === 'inventory' && (
-          <div className="flex-1 p-6 overflow-y-auto">
+          <div className="flex-1 p-3 md:p-6 overflow-y-auto">
             <div className="max-w-6xl mx-auto space-y-6">
               
               <div className="flex justify-between items-center">
@@ -1690,7 +1748,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
 
         {/* VIEW 4: END OF DAY (EOD) RECONCILIATION */}
         {activeTab === 'eod' && (
-          <div className="flex-1 p-6 overflow-y-auto">
+          <div className="flex-1 p-3 md:p-6 overflow-y-auto">
             <div className="max-w-6xl mx-auto space-y-6">
               
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -1944,7 +2002,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
 
         {/* VIEW 5: ANALYTICS & REVENUE */}
         {activeTab === 'analytics' && (
-          <div className="flex-1 p-6 overflow-y-auto">
+          <div className="flex-1 p-3 md:p-6 overflow-y-auto">
             <div className="max-w-6xl mx-auto space-y-6">
               
               <div className="flex flex-wrap items-start justify-between gap-3">
@@ -2078,7 +2136,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
 
       {restockItem && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <form onSubmit={handleRestock} className="bg-slate-900 border border-slate-800 rounded-3xl max-w-sm w-full p-6 space-y-4 shadow-2xl text-slate-200">
+          <form onSubmit={handleRestock} className="bg-slate-900 border border-slate-800 rounded-3xl max-w-sm w-full p-4 sm:p-6 space-y-4 shadow-2xl text-slate-200 max-h-[94dvh] overflow-y-auto">
             <div className="flex justify-between items-start">
               <div>
                 <h3 className="text-xl font-extrabold">Receive Stock</h3>
@@ -2131,7 +2189,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
       {/* 1. EOD PRINTABLE SUMMARY MODAL */}
       {eodSummaryModal && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-2xl w-full p-6 space-y-6 shadow-2xl">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-2xl w-full p-4 sm:p-6 space-y-6 shadow-2xl max-h-[94dvh] overflow-y-auto">
             
             <div className="flex justify-between items-center pb-4 border-b border-slate-800">
               <div>
@@ -2225,7 +2283,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
       {/* 2. CHECKOUT MODAL */}
       {isCheckoutOpen && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-md w-full p-6 space-y-5 shadow-2xl max-h-[94vh] overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-md w-full p-6 space-y-5 shadow-2xl max-h-[94dvh] overflow-y-auto">
             
             <div className="flex justify-between items-center">
               <h3 className="text-xl font-extrabold text-slate-100">Take Payment</h3>
@@ -2346,7 +2404,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
       {/* 3. PRE-AUTH TAB MODAL */}
       {isPreAuthOpen && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-md w-full p-6 space-y-6 shadow-2xl">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-md w-full p-4 sm:p-6 space-y-6 shadow-2xl max-h-[94dvh] overflow-y-auto">
             
             <div className="flex justify-between items-center">
               <h3 className="text-xl font-extrabold text-slate-100">Open a Tab</h3>
@@ -2410,7 +2468,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
       {/* 4. NEW ITEM INVENTORY MODAL */}
       {isItemModalOpen && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <form onSubmit={handleSaveNewItem} className="bg-slate-900 border border-slate-800 rounded-3xl max-w-md w-full p-6 space-y-4 shadow-2xl max-h-[94vh] overflow-y-auto">
+          <form onSubmit={handleSaveNewItem} className="bg-slate-900 border border-slate-800 rounded-3xl max-w-md w-full p-6 space-y-4 shadow-2xl max-h-[94dvh] overflow-y-auto">
             
             <div className="flex justify-between items-center">
               <h3 className="text-xl font-extrabold text-slate-100">Add New Item</h3>
@@ -2554,7 +2612,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
       {/* 5. DIGITAL RECEIPT MODAL */}
       {currentReceipt && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-sm w-full p-6 space-y-4 shadow-2xl">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-sm w-full p-4 sm:p-6 space-y-4 shadow-2xl max-h-[94dvh] overflow-y-auto">
             
             <div className="text-center space-y-1 pb-3 border-b border-slate-800">
               <h3 className="font-extrabold text-lg text-slate-100">{bizName || BRAND.product}</h3>

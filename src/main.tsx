@@ -33,5 +33,5 @@ boot();
 
 // PWA: register the service worker only on a real website (not inside Electron / the Android app / dev server).
 if ('serviceWorker' in navigator && location.protocol === 'https:' && !(window as any).Capacitor?.isNativePlatform?.()) {
-  window.addEventListener('load', () => { navigator.serviceWorker.register('./sw.js').catch(() => {}); });
+  window.addEventListener('load', () => { navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).then(r => r.update().catch(() => {})).catch(() => {}); });
 }
