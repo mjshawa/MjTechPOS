@@ -238,6 +238,22 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
   const [cartCredit, setCartCredit] = usePersistentState(`${workspace}:cartCredit`, {});
   const [openTabs, setOpenTabs] = usePersistentCollection(`${workspace}:openTabs`, INITIAL_TABS, { newestFirst: true });
   const [searchQuery, setSearchQuery] = useState('');
+  // Stock Tracking search: type part of a name, code or category (e.g. "castle", "mosi big", "whol"); all words must match.
+  const [stockSearch, setStockSearch] = useState('');
+  const [stockFilter, setStockFilter] = useState<'all' | 'low' | 'out'>('all');
+  const stockSearchRef = useRef<HTMLInputElement>(null);
+  const areaOf = (p: any) => (p.category === 'Retail' ? 'Wholesale' : p.category || '');
+  const stockRows = useMemo(() => {
+    const words = stockSearch.toLowerCase().trim().split(/\s+/).filter(Boolean);
+    const hay = (p: any) => `${p.name} ${p.sku} ${areaOf(p)} ${p.category || ''} ${p.subcategory || ''}`.toLowerCase();
+    let list = scopedProducts.filter((p: any) => words.every(w => hay(p).includes(w)));
+    if (stockFilter === 'out') list = list.filter((p: any) => p.stock <= 0);
+    else if (stockFilter === 'low') list = list.filter((p: any) => p.stock > 0 && p.stock <= p.minThreshold);
+    if (words.length) { const q = words.join(' '); list = [...list].sort((a: any, b: any) => Number(!a.name.toLowerCase().startsWith(q)) - Number(!b.name.toLowerCase().startsWith(q))); } // names that START with what you typed come first
+    return list;
+  }, [scopedProducts, stockSearch, stockFilter]);
+  const lowCount = scopedProducts.filter((p: any) => p.stock > 0 && p.stock <= p.minThreshold).length;
+  const outCount = scopedProducts.filter((p: any) => p.stock <= 0).length;
   const [selectedSubcat, setSelectedSubcat] = useState('All');
   const [discount, setDiscount] = useState(0); // Percent
   const [customerName, setCustomerName] = useState('');
@@ -613,6 +629,8 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
     setOutbox((prev: any[]) => [...prev, { id: entry.id, table: 'stock_log', payload: { ...entry, storeId }, failed: false }]); // syncs to Supabase
     setRestockItem(null);
     setRestockForm({ qty: '', cost: '', by: 'bottle', buyId: '' });
+    setStockSearch(''); setStockFilter('all'); // ready to search the next item
+    setTimeout(() => stockSearchRef.current?.focus(), 80);
   };
 
   // Staff can only use Terminal + Tabs
@@ -1832,6 +1850,39 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                 )}
               </div>
 
+              {/* Search: find an item fast, then tap Restock */}
+              <div className="space-y-3">
+                <div className="relative">
+                  <Search className="h-5 w-5 text-slate-500 absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    ref={stockSearchRef}
+                    type="text"
+                    inputMode="search"
+                    autoComplete="off"
+                    value={stockSearch}
+                    onChange={(e) => setStockSearch(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') setStockSearch('');
+                      if (e.key === 'Enter' && isOwner && stockRows.length === 1) { e.preventDefault(); const p = stockRows[0]; setRestockItem(p); setRestockForm({ qty: '', cost: '', by: hasBox(p) ? 'box' : 'bottle', buyId: '' }); }
+                    }}
+                    placeholder={isOwner ? 'Search an item to restock: name, code or Bar / Wholesale' : 'Search an item: name or code'}
+                    className="w-full bg-slate-900 border border-slate-700 focus:border-amber-500 rounded-2xl pl-12 pr-12 py-3.5 text-base text-slate-100 placeholder:text-slate-500 outline-none"
+                  />
+                  {stockSearch && (
+                    <button onClick={() => { setStockSearch(''); stockSearchRef.current?.focus(); }} title="Clear" className="absolute right-3 top-1/2 -translate-y-1/2 h-8 w-8 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-300 flex items-center justify-center"><X className="h-4 w-4" /></button>
+                  )}
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  {([['all', `All (${scopedProducts.length})`], ['low', `Running low (${lowCount})`], ['out', `Out of stock (${outCount})`]] as const).map(([id, label]) => (
+                    <button key={id} onClick={() => setStockFilter(id)}
+                      className={`px-3.5 py-1.5 rounded-full text-xs font-bold border transition-colors ${stockFilter === id ? (id === 'out' ? 'bg-rose-500 text-white border-rose-500' : 'bg-amber-500 text-slate-950 border-amber-500') : 'bg-slate-900 text-slate-300 border-slate-700 hover:border-slate-500'}`}>
+                      {label}
+                    </button>
+                  ))}
+                  {(stockSearch || stockFilter !== 'all') && <span className="text-xs text-slate-500 ml-1">{stockRows.length} found{isOwner && stockRows.length === 1 ? ' · press Enter to restock' : ''}</span>}
+                </div>
+              </div>
+
               {/* Detailed Inventory Table */}
               <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
                 <div className="overflow-x-auto">
@@ -1851,7 +1902,10 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800">
-                    {scopedProducts.map(product => {
+                    {stockRows.length === 0 && (
+                      <tr><td colSpan={isOwner ? 8 : 5} className="px-6 py-10 text-center text-slate-500">No item found{stockSearch ? <> for <b className="text-slate-300">“{stockSearch}”</b></> : ''}. Check the spelling or clear the search.</td></tr>
+                    )}
+                    {stockRows.map(product => {
                       const totalRevenue = shiftRevenueByProduct.get(product.id) ?? 0; // real money taken this shift (boxes and bottles at their own prices)
                       const potentialValue = product.stock * product.price; // counted at the single-bottle price
                       const isLow = product.stock <= product.minThreshold && product.stock > 0;
@@ -1863,7 +1917,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                             <ProductThumb product={product} size={48} />
                             <div>
                               <p className="font-bold text-slate-100">{product.name}</p>
-                              <p className="text-xs text-slate-500 font-mono">{product.sku}</p>
+                              <p className="text-xs text-slate-500 font-mono">{product.sku}<span className={`ml-2 px-1.5 py-0.5 rounded text-[10px] font-bold font-sans ${product.category === 'Retail' ? 'bg-indigo-500/20 text-indigo-300' : 'bg-slate-800 text-slate-400'}`}>{areaOf(product)}</span></p>
                             </div>
                           </td>
                           <td className="px-6 py-4 font-mono font-semibold text-slate-300">
