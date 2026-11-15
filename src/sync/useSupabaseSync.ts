@@ -10,7 +10,7 @@ import { deriveMoves, mergePulled, pickStock, sig, sigOfJson, sumPending } from 
 /**
  * SQLite stays the source of truth on the device. This hook mirrors it to Supabase:
  *
- *  1. PUSH outbox  – sales + closed shifts + deliveries + expenses, oldest first. Insert-only with ON CONFLICT DO NOTHING on the
+ *  1. PUSH outbox  – sales + closed shifts + deliveries + expenses + staff drawers, oldest first. Insert-only with ON CONFLICT DO NOTHING on the
  *                    client UUID, so a retry after a lost response can never double-count a sale.
  *  1c. PUSH stock moves – STOCK is never uploaded as a number. Each change (a sale, a delivery, a stock count) becomes a
  *                    move with a client UUID; the server adds it to the product atomically and ignores a retry. So two devices
@@ -66,7 +66,7 @@ export function useSupabaseSync({ outbox, setOutbox, products, setProducts, coll
         } else if (/^(22|23)/.test((err as any).code || '')) {
           setOutbox((p: any[]) => p.map(o => (o.id === item.id ? { ...o, failed: true } : o))); // bad data: park it
         } else if (['42P01', 'PGRST205'].includes((err as any).code)) {
-          setError(`Table "${table}" is missing in Supabase. Run the files in supabase/migrations/ (2_stock_log.sql, 3_expenses.sql, 4_refunds.sql).`);
+          setError(`Table "${table}" is missing in Supabase. Run the files in supabase/migrations/ (2_stock_log.sql, 3_expenses.sql, 4_refunds.sql, 7_staff_drawers.sql).`);
           continue; // leave it queued, but don't hold up sales behind it
         } else {
           throw err; // auth/network/server problem: stop, retry later (order preserved)
@@ -101,9 +101,9 @@ export function useSupabaseSync({ outbox, setOutbox, products, setProducts, coll
 
       // 1b. PULL what OTHER devices recorded (sales, closed shifts, deliveries), so the owner sees the bar and the
       //     retail store together. Rows are matched by id, so our own uploads coming back change nothing.
-      const sortKey: Record<string, string> = { sales: 'ts', closed_shifts: 'closedAt', stock_log: 'ts', expenses: 'ts', refunds: 'ts' };
+      const sortKey: Record<string, string> = { sales: 'ts', closed_shifts: 'closedAt', stock_log: 'ts', expenses: 'ts', refunds: 'ts', drawers: 'ts' };
       const nextCursors: Record<string, string> = { ...ref.current.cursors };
-      for (const table of ['sales', 'closed_shifts', 'stock_log', 'expenses', 'refunds']) {
+      for (const table of ['sales', 'closed_shifts', 'stock_log', 'expenses', 'refunds', 'drawers']) {
         let c: string = nextCursors[table] || new Date(Date.now() - 60 * 86400000).toISOString(); // first pull: last 60 days
         for (;;) {
           const { data, error: err } = await supabase.from(table).select('id, payload, received_at')

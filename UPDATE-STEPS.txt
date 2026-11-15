@@ -1,0 +1,37 @@
+UPDATE: Staff Drawers + simple money screens
+=============================================
+This folder holds ONLY the files that changed. Copy them over your bar-pos-app folder (same paths).
+It does NOT contain .env, node_modules, .git, or any customer data, so nothing of the client's is touched.
+
+STEP 0  Safety (2 minutes)
+  cd bar-pos-app
+  git add -A && git commit -m "backup before staff drawers"     (your project already uses git)
+  In the live app: Owner > export / backup if available. In Supabase: Database > Backups (or Table editor > export).
+
+STEP 1  Copy the files in this folder into bar-pos-app (say Yes to "replace"):
+  src/App.tsx                       replaced (newer version of your file)
+  src/exportExcel.ts                replaced (small change)
+  src/sync/useSupabaseSync.ts       replaced (small change: also syncs "drawers")
+  src/DrawersView.tsx               NEW
+  src/MoneySimple.tsx               NEW
+  src/ReprintView.tsx               NEW
+  src/ShiftRecordModal.tsx          NEW
+  src/drawers.ts                    NEW
+  supabase/migrations/7_staff_drawers.sql   NEW
+  supabase/schema.sql               replaced (only adds the drawers table; for new installs)
+  (README.md is NOT included. Keep yours.)
+
+STEP 2  Supabase: add the new table (do this BEFORE going live)
+  Supabase > SQL Editor > paste the whole of supabase/migrations/7_staff_drawers.sql > Run.
+  It uses "create table if not exists", so it only ADDS a table. It never deletes or changes existing data.
+
+STEP 3  Test, then deploy
+  npm run build            (must finish with no errors)
+  npm run preview          (quick look: End of Day and Closed Shifts)
+  git add -A && git commit -m "staff drawers + simple money" && git push     (or your usual wrangler deploy)
+
+STEP 4  On the shop devices
+  Open the app. A "New version ready" banner appears. Tap Update when no sale is in progress.
+  Do NOT clear browser data and do NOT uninstall the app.
+
+IF SOMETHING GOES WRONG: git revert HEAD (or redeploy the previous commit). Data is unaffected either way.

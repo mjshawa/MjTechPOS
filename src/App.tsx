@@ -66,7 +66,12 @@ import SyncModal from './sync/SyncModal';
 import TeamModal from './auth/TeamModal';
 import CalendarView from './CalendarView';
 import StockHistoryModal from './StockHistoryModal';
+import ShiftRecordModal from './ShiftRecordModal';
+import MoneySimple, { ShiftMoneyCard } from './MoneySimple';
+import ReprintView from './ReprintView';
 import ExpensesView, { PAID_FROM } from './ExpensesView';
+import DrawersView, { VerdictBadge } from './DrawersView';
+import { drawerFigures, expectedCash, r2 as round2, verdictOf, type OpenDrawer } from './drawers';
 import { BRAND, EMPTY_BUSINESS, businessLine, withDefaults } from './brand';
 import BusinessModal from './BusinessModal';
 import SalesView, { refundFactor } from './SalesView';
@@ -80,7 +85,24 @@ import { printHtml, buildEodReportHtml, buildReceiptHtml, sampleReceipt, buildRe
 const CURRENCY = 'K';          // Zambian Kwacha
 const TAX_RATE = 0;            // 0 = no tax added. Set e.g. 0.16 ONLY if your prices exclude VAT.
 const DAY_MS = 24 * 60 * 60 * 1000;
+// Owner stock adjustments (outside a delivery). `loss` reasons count as lost stock (cost x quantity) in profit; the others do not.
+const ADJUST_OUT = [
+  { id: 'damaged', label: 'Damaged / spilled / broken', loss: true },
+  { id: 'expired', label: 'Expired', loss: true },
+  { id: 'staff', label: 'Used by staff / given free', loss: true },
+  { id: 'missing', label: 'Missing / stolen', loss: true },
+  { id: 'supplier', label: 'Returned to supplier', loss: false },
+  { id: 'count', label: 'Counting correction', loss: false },
+];
+const ADJUST_IN = [
+  { id: 'count', label: 'Counting correction (found extra)' },
+  { id: 'customer', label: 'Returned by a customer' },
+  { id: 'transfer', label: 'Moved in from another place' },
+  { id: 'other', label: 'Other' },
+];
+const BIN_DAYS = 5; // a deleted stock item waits in the Bin this long, then is removed for good
 
+const r2n = (n: number) => Math.round((Number(n) || 0) * 100) / 100;
 const money = (n: any) =>
   `${CURRENCY} ${(Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const fmtDateTime = (ts: number) =>
@@ -208,9 +230,12 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
     const rank = (p: any) => { const i = SEED_ORDER.indexOf(p.id); return i < 0 ? 1e6 : i; };
     return products.filter((p: any) => !p.archived).sort((a: any, b: any) => rank(a) - rank(b));
   }, [products]);
-  const deletedProducts = useMemo(() => products.filter((p: any) => p.archived), [products]);
+  const deletedProducts = useMemo(() => products.filter((p: any) => p.archived && !p.purged), [products]); // the Bin (purged = gone for good)
   useEffect(() => { setMode(WS); }, [WS]);
   const [cart, setCart] = usePersistentState(`${workspace}:cart`, []);
+  // Bottles of each product that were ALREADY taken out of stock when a tab was saved. They sit in the cart again while the tab is
+  // being paid, so they must not be taken out a second time. { productId: bottles }
+  const [cartCredit, setCartCredit] = usePersistentState(`${workspace}:cartCredit`, {});
   const [openTabs, setOpenTabs] = usePersistentCollection(`${workspace}:openTabs`, INITIAL_TABS, { newestFirst: true });
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedSubcat, setSelectedSubcat] = useState('All');
@@ -233,6 +258,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
   const [physicalCounts, setPhysicalCounts] = usePersistentState(`${workspace}:physicalCounts`, {});
   const [isEodLocked, setIsEodLocked] = usePersistentState(`${workspace}:eodLocked`, false);
   const [eodSummaryModal, setEodSummaryModal] = useState(false);
+  const [viewShift, setViewShift] = useState<any>(null); // the shift whose full record is open
   // Cash drawer: opening float is entered at shift start, counted cash at the end. Both are saved on the device.
   const [cashFloat, setCashFloat] = usePersistentState(`${workspace}:cashFloat`, '');
   const [cashCounted, setCashCounted] = usePersistentState(`${workspace}:cashCounted`, '');
@@ -245,6 +271,10 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
   // Analytics aggregate stats
   const [salesHistory, setSalesHistory] = usePersistentCollection(`${workspace}:salesHistory`, [], { newestFirst: true });
   const [closedShifts, setClosedShifts] = usePersistentCollection(`${workspace}:closedShifts`, [], { newestFirst: true });
+  // Staff cash drawers: each staff member opens and counts their OWN drawer. Open ones stay on this device; closed ones are
+  // append-only records (synced like sales) the owner reviews under Staff Drawers.
+  const [drawers, setDrawers] = usePersistentCollection(`${workspace}:drawers`, [], { newestFirst: true });
+  const [openDrawers, setOpenDrawers] = usePersistentState(`${workspace}:openDrawers`, {});
   // A "shift" runs from open to close, NOT midnight to midnight, so a 3 AM close stays one business day.
   const [shiftStart, setShiftStart] = usePersistentState(`${workspace}:shiftStart`, Date.now());
   const [outbox, setOutbox] = usePersistentCollection(`${workspace}:outbox`, []);
@@ -327,7 +357,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
   const [businessRaw, setBusiness] = usePersistentState('business', EMPTY_BUSINESS);
   const sync = useSupabaseSync({
     outbox, setOutbox, products, setProducts, tabs: openTabs, setTabs: setOpenTabs, business: businessRaw, setBusiness,
-    collections: { sales: setSalesHistory, closed_shifts: setClosedShifts, stock_log: setStockLog, expenses: setExpenses, refunds: setRefunds },
+    collections: { sales: setSalesHistory, closed_shifts: setClosedShifts, stock_log: setStockLog, expenses: setExpenses, refunds: setRefunds, drawers: setDrawers },
     storeId, workspace,
   });
   const [showSync, setShowSync] = useState(false);
@@ -337,17 +367,28 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
   // An expense belongs to the shift it was recorded in (key = device + shift opening time). A late expense entered
   // after close keeps the key of the shift that just closed, because shiftStart only changes when a new shift starts.
   const voidedIds = useMemo(() => new Set<string>(expenses.filter((e: any) => e.kind === 'void').map((e: any) => e.voidOf)), [expenses]);
-  const liveExpenses = useMemo(() => expenses.filter((e: any) => e.kind !== 'void' && !voidedIds.has(e.id)), [expenses, voidedIds]);
+  // Stock bought with drawer cash is stored beside the expenses (same table, kind 'stockbuy') but is NOT an expense: it only
+  // becomes a cost when the stock is sold (cost of goods). So it stays out of liveExpenses (profit, End of Day net, Calendar)
+  // while still counting as cash that left the drawer.
+  const liveExpenses = useMemo(() => expenses.filter((e: any) => e.kind !== 'void' && e.kind !== 'stockbuy' && !voidedIds.has(e.id)), [expenses, voidedIds]);
+  const liveStockBuys = useMemo(() => expenses.filter((e: any) => e.kind === 'stockbuy' && !voidedIds.has(e.id)), [expenses, voidedIds]);
   const expensesByShift = useMemo(() => {
-    const m = new Map<string, { total: number; till: number; mobile: number; owner: number }>();
+    const m = new Map<string, { total: number; till: number; mobile: number; owner: number; stock?: number }>();
     liveExpenses.forEach((e: any) => {
       const t = m.get(e.shiftKey) || { total: 0, till: 0, mobile: 0, owner: 0 };
       t.total += e.amount;
       (t as any)[e.paidFrom] = ((t as any)[e.paidFrom] || 0) + e.amount;
       m.set(e.shiftKey, t);
     });
+    // Stock bought with drawer cash: not in `total` (not a cost), but it IS cash out of the till, so it joins `till`.
+    liveStockBuys.forEach((e: any) => {
+      const t = m.get(e.shiftKey) || { total: 0, till: 0, mobile: 0, owner: 0 };
+      t.stock = (t.stock || 0) + e.amount;
+      if (e.paidFrom === 'till') t.till += e.amount;
+      m.set(e.shiftKey, t);
+    });
     return m;
-  }, [liveExpenses]);
+  }, [liveExpenses, liveStockBuys]);
   const shiftExpenseList = useMemo(() => liveExpenses.filter((e: any) => e.shiftKey === shiftKey), [liveExpenses, shiftKey]);
   const shiftExpenseTotals = expensesByShift.get(shiftKey) || { total: 0, till: 0, mobile: 0, owner: 0 };
   const shiftCashSales = useMemo(() => shiftSales.filter((x: any) => x.method === 'cash').reduce((a: number, x: any) => a + x.total, 0) - shiftRefundTotals.cash, [shiftSales, shiftRefundTotals]);
@@ -386,7 +427,8 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
       day(dk(x.ts)).expenses += x.amount;
       catMap.set(x.category, (catMap.get(x.category) || 0) + x.amount);
     });
-    const shrink = closedShifts.filter((c: any) => c.openedAt >= from).reduce((a: number, c: any) => a + (c.shrinkageValue || 0), 0);
+    const shrink = closedShifts.filter((c: any) => c.openedAt >= from).reduce((a: number, c: any) => a + (c.shrinkageValue || 0), 0)
+      + stockLog.filter((l: any) => l.type === 'adjust_out' && l.loss && l.ts >= from).reduce((a: number, l: any) => a + (l.qty || 0) * (l.cost || 0), 0); // recorded write-offs (spilled, expired...)
     const list = [...days.values()].map(d => ({ ...d, net: d.revenue - d.cogs - d.expenses })).sort((a, b) => b.day.localeCompare(a.day));
     const revenue = list.reduce((a, d) => a + d.revenue, 0);
     const cogs = list.reduce((a, d) => a + d.cogs, 0);
@@ -397,20 +439,51 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
       series: [...list].reverse().slice(-60).map(d => ({ day: d.day.slice(5), revenue: Math.round(d.revenue * 100) / 100, expenses: Math.round(d.expenses * 100) / 100, net: Math.round(d.net * 100) / 100 })),
       days: list.slice(0, 14), byCat: [...catMap.entries()].sort((a, b) => b[1] - a[1]),
     };
-  }, [profitPeriod, salesHistory, refunds, liveExpenses, closedShifts, products]);
+  }, [profitPeriod, salesHistory, refunds, liveExpenses, closedShifts, products, stockLog]);
 
   const queueExpense = (entry: any) => {
     setExpenses((prev: any[]) => [entry, ...prev]);
     setOutbox((prev: any[]) => [...prev, { id: entry.id, table: 'expenses', payload: { ...entry, storeId }, failed: false }]);
   };
   const handleAddExpense = (f: { amount: number; category: string; paidFrom: string; payee: string; note: string }) => {
-    queueExpense({ id: newId(), kind: 'expense', ts: Date.now(), shiftKey, ...f, by: user.name, afterClose: isEodLocked });
+    queueExpense({ id: newId(), kind: 'expense', ts: Date.now(), shiftKey, ...f, by: user.name, byId: user.id, afterClose: isEodLocked });
   };
   const handleVoidExpense = (e: any) => {
     if (!isOwner) return;
     if (!window.confirm(`Cancel this expense?\n\n${e.category}: ${money(e.amount)}\n\nIt will stay on record but will not count in the totals.`)) return;
     queueExpense({ id: newId(), kind: 'void', voidOf: e.id, ts: Date.now(), shiftKey: e.shiftKey, category: e.category, amount: e.amount, by: user.name });
   };
+
+  // Cash taken out of a drawer to pay for stock. Recorded here so the drawer still balances; the owner then links the delivery to it.
+  const handleStockBuy = (f: { amount: number; supplier: string; note: string }) => {
+    queueExpense({ id: newId(), kind: 'stockbuy', category: 'Stock purchase', ts: Date.now(), shiftKey, amount: f.amount, paidFrom: 'till', payee: f.supplier, note: f.note, by: user.name, byId: user.id, afterClose: isEodLocked });
+  };
+
+  // ---------- STAFF DRAWERS ----------
+  // The owner's own sales need no drawer; every staff member opens one before selling.
+  const myOpenDrawer: OpenDrawer | null = !isOwner ? (openDrawers[user.id] || null) : null;
+  const needsDrawer = !isOwner && !myOpenDrawer;
+  const figuresFor = (d: OpenDrawer, to = Date.now()) =>
+    drawerFigures({ staffId: d.staffId, staffName: d.staffName, from: d.openedAt, to, deviceId: d.deviceId, sales: salesHistory, refunds, liveExpenses: [...liveExpenses, ...liveStockBuys] });
+  const handleOpenDrawer = (float: number) => {
+    if (isOwner) return;
+    setOpenDrawers((prev: any) => ({ ...prev, [user.id]: { staffId: user.id, staffName: user.name, openedAt: Date.now(), float: round2(float), deviceId } }));
+  };
+  const handleCloseDrawer = (counted: number, d: OpenDrawer) => {
+    const closedAt = Date.now();
+    const f = figuresFor(d, closedAt);
+    const expected = expectedCash(d.float, f);
+    const rec = {
+      id: newId(), ts: closedAt, staffId: d.staffId, staffName: d.staffName, openedAt: d.openedAt, closedAt, deviceId: d.deviceId,
+      float: d.float, ...f, expected, counted: round2(counted), variance: round2(counted - expected),
+      closedBy: d.staffId === user.id ? 'self' : user.name, // the owner can close a drawer for someone who left without counting
+    };
+    setDrawers((prev: any[]) => [rec, ...prev]);
+    setOutbox((prev: any[]) => [...prev, { id: rec.id, table: 'drawers', payload: { ...rec, storeId }, failed: false }]);
+    setOpenDrawers((prev: any) => { const n = { ...prev }; delete n[d.staffId]; return n; });
+  };
+  const drawerStaff = useMemo(() => (auth?.staff || []).map((x: any) => ({ id: x.id, name: x.name || x.email, role: x.role })), [auth?.staff]);
+  const shiftDrawers = useMemo(() => drawers.filter((d: any) => d.closedAt >= shiftStart && (!d.deviceId || d.deviceId === deviceId)), [drawers, shiftStart, deviceId]);
 
   // ---------- REFUNDS ----------
   const handleRefund = ({ sale, lines, method, reason }: { sale: any; lines: any[]; method: string; reason: string }) => {
@@ -457,9 +530,24 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
     if (!r) return;
     const digits = normalizeWhatsAppNumber(waPhone);
     if (!digits) { setWaError('Enter a valid phone number, e.g. 0977123456'); return; }
-    const text = buildReceiptText({ ...r, business, businessName: bizName || BRAND.product, footer: business.footer, product: BRAND.product, taxPct: Math.round(TAX_RATE * 100), money });
+    const text = buildReceiptText({ ...receiptForOutput(r), business, businessName: bizName || BRAND.product, product: BRAND.product, taxPct: Math.round(TAX_RATE * 100), money });
     window.open(whatsAppLink(digits, text), '_blank', 'noopener');
   };
+  // Reprint of an old sale: the same receipt, clearly marked as a copy so it cannot pass for the original.
+  const handleReprint = (sale: any) => {
+    const t = new Date(sale.ts);
+    setCurrentReceipt({
+      ...sale,
+      paymentMethod: sale.paymentMethod || sale.method || 'cash',
+      grandTotal: sale.grandTotal ?? sale.total,
+      date: sale.date || t.toLocaleDateString(),
+      timestamp: sale.timestamp || sale.time || t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      isReprint: true, reprintedAt: Date.now(), reprintedBy: user.name,
+    } as any);
+  };
+  const receiptForOutput = (r: any) => r?.isReprint
+    ? { ...r, txId: `${r.txId} (DUPLICATE COPY)`, footer: `DUPLICATE COPY - reprinted ${fmtDateTime(r.reprintedAt)} by ${r.reprintedBy}${business.footer ? ` · ${business.footer}` : ''}` }
+    : { ...r, footer: business.footer };
   const [showBusiness, setShowBusiness] = useState(false);
   const bizName = (business?.name || '').trim();
   useEffect(() => { document.title = bizName ? `${bizName} · ${BRAND.product}` : BRAND.product; }, [bizName]);
@@ -476,8 +564,35 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
     }
     setExporting(false);
   };
-  const [restockForm, setRestockForm] = useState({ qty: '', cost: '', by: 'bottle' }); // by: count what arrived in bottles or in boxes
+  const [restockForm, setRestockForm] = useState({ qty: '', cost: '', by: 'bottle', buyId: '' }); // by: count what arrived in bottles or in boxes
   const [showStockHistory, setShowStockHistory] = useState(false);
+  const [adjustItem, setAdjustItem] = useState<any>(null);
+  const [adjustForm, setAdjustForm] = useState({ dir: 'out', by: 'bottle', qty: '', reason: 'damaged', note: '' });
+  const adjustQty = (p: any, f = adjustForm) => (parseInt(f.qty, 10) || 0) * (f.by === 'box' && hasBox(p) ? Number(p.boxQty) : 1); // always bottles
+
+  // Owner: take stock off or put stock on outside a delivery (spillage, staff use, a counting mistake...). It is written to the stock history.
+  const handleAdjust = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isOwner || !adjustItem) return;
+    const out = adjustForm.dir === 'out';
+    const qty = adjustQty(adjustItem);
+    if (qty <= 0) return;
+    if (out && qty > adjustItem.stock) { alert(`There are only ${stockText(adjustItem)} in stock, so you cannot take off more than that.`); return; }
+    const reason = (out ? ADJUST_OUT : ADJUST_IN).find(r => r.id === adjustForm.reason) || (out ? ADJUST_OUT : ADJUST_IN)[0];
+    const sign = out ? -1 : 1;
+    // Like a delivery, the opening stock moves too, so the change is not mistaken for missing/extra stock at End of Day.
+    setProducts((prev: any[]) => prev.map(p => (p.id === adjustItem.id
+      ? { ...p, stock: Math.max(0, p.stock + sign * qty), startingStock: Math.max(0, p.startingStock + sign * qty) } : p)));
+    setPhysicalCounts((prev: any) => ({ ...prev, [adjustItem.id]: Math.max(0, (prev[adjustItem.id] ?? adjustItem.stock) + sign * qty) }));
+    const entry = {
+      id: newId(), type: out ? 'adjust_out' : 'adjust_in', ts: Date.now(), productId: adjustItem.id, name: adjustItem.name, qty, cost: adjustItem.cost || 0,
+      reason: reason.label, loss: out && (reason as any).loss === true, note: adjustForm.note.trim(), by: user.name,
+    };
+    setStockLog((prev: any[]) => [entry, ...prev]);
+    setOutbox((prev: any[]) => [...prev, { id: entry.id, table: 'stock_log', payload: { ...entry, storeId }, failed: false }]);
+    setAdjustItem(null);
+    setAdjustForm({ dir: 'out', by: 'bottle', qty: '', reason: 'damaged', note: '' });
+  };
 
   const handleRestock = (e: React.FormEvent) => {
     e.preventDefault();
@@ -493,15 +608,15 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
     setProducts((prev: any[]) => prev.map(p => p.id === restockItem.id
       ? { ...p, stock: p.stock + qty, startingStock: p.startingStock + qty, cost: newCost, ...(newBoxCost !== undefined ? { boxCost: newBoxCost } : {}) } : p));
     setPhysicalCounts((prev: any) => ({ ...prev, [restockItem.id]: (prev[restockItem.id] ?? restockItem.stock) + qty }));
-    const entry = { id: newId(), type: 'restock', ts: Date.now(), productId: restockItem.id, name: restockItem.name, qty, cost: newCost, by: user.name };
+    const entry = { id: newId(), type: 'restock', ts: Date.now(), productId: restockItem.id, name: restockItem.name, qty, cost: newCost, by: user.name, buyId: restockForm.buyId || null };
     setStockLog((prev: any[]) => [entry, ...prev]);
     setOutbox((prev: any[]) => [...prev, { id: entry.id, table: 'stock_log', payload: { ...entry, storeId }, failed: false }]); // syncs to Supabase
     setRestockItem(null);
-    setRestockForm({ qty: '', cost: '', by: 'bottle' });
+    setRestockForm({ qty: '', cost: '', by: 'bottle', buyId: '' });
   };
 
   // Staff can only use Terminal + Tabs
-  useEffect(() => { if (!isOwner && !['pos', 'tabs', 'sales', 'inventory', 'expenses', 'calendar'].includes(activeTab)) setActiveTab('pos'); }, [isOwner, activeTab]);
+  useEffect(() => { if (!isOwner && !['pos', 'tabs', 'sales', 'reprint', 'inventory', 'expenses', 'drawer', 'calendar'].includes(activeTab)) setActiveTab('pos'); }, [isOwner, activeTab]);
 
   // Calendar feed: every closed shift + the shift still open
   const openShiftSummary = useMemo(() => {
@@ -610,7 +725,29 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
     const bulk = (it.pack || 'single') === 'single' && it.bulkQty > 0 && it.bulkPrice > 0 && it.qty >= it.bulkQty;
     return { ...it, price: (bulk ? it.bulkPrice : it._base) + (it.variantExtra || 0), bulkApplied: bulk };
   };
-  const stockOf = (id: string) => products.find((p: any) => p.id === id)?.stock;
+  const creditOf = (id: string) => Number((cartCredit as any)[id]) || 0;
+  // What the till can still sell of a product: stock minus everything already clicked into the current order.
+  // (Stock already taken out for a tab being paid is added back, because those bottles are in the order too.)
+  const inOrderOf = (id: string, list: any[] = cart) => list.filter((i: any) => i.id === id).reduce((a: number, i: any) => a + bottlesOf(i), 0);
+  const availOf = (p: any) => Math.max(0, p.stock + creditOf(p.id) - inOrderOf(p.id));
+  // Stock for the cap checks: real stock plus the bottles a tab already took out.
+  const stockOf = (id: string) => { const st = products.find((p: any) => p.id === id)?.stock; return st === undefined ? undefined : st + creditOf(id); };
+  // Take a cart out of stock. Bottles already taken out for a tab (credit) are not taken twice; a smaller order gives the rest back.
+  const applyCartToStock = (items: any[]) => {
+    setProducts((prevProducts: any[]) => prevProducts.map((prod: any) => {
+      const bottles = inOrderOf(prod.id, items), credit = creditOf(prod.id);
+      if (!bottles && !credit) return prod;
+      const net = bottles - credit; // can be negative: the order shrank after the tab was saved
+      return { ...prod, stock: Math.max(0, prod.stock - net), unitsSold: Math.max(0, (prod.unitsSold || 0) + net) };
+    }));
+    const counts: Record<string, number> = {};
+    products.forEach((prod: any) => {
+      const bottles = inOrderOf(prod.id, items), credit = creditOf(prod.id);
+      if (bottles || credit) counts[prod.id] = Math.max(0, prod.stock - (bottles - credit));
+    });
+    setPhysicalCounts((prev: any) => ({ ...prev, ...counts }));
+    setCartCredit({});
+  };
 
   // Put `qty` of a product (one bottle/item, or one box) into a cart list. Returns the SAME list when nothing fits in stock.
   const addLine = (list: any[], product: any, variant: string | null, pack: 'single' | 'box' | 'half', qty: number) => {
@@ -622,7 +759,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
     const itemKey = `${product.id}${variant ? '-' + variant : ''}${isBox ? '-' + def.id : ''}`;
     const existing = list.find(item => item.cartId === itemKey);
     const probe = { id: product.id, cartId: itemKey, size };
-    const cap = capQty(list, probe, product.stock);
+    const cap = capQty(list, probe, product.stock + creditOf(product.id));
     if (existing) {
       const q = Math.min(existing.qty + qty, cap);
       return q === existing.qty ? list : list.map(item => (item.cartId === itemKey ? repriceItem({ ...item, qty: q }) : item));
@@ -649,15 +786,16 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
   const addToCart = (product, variant = null, pack: 'single' | 'box' | 'half' = 'single') => {
     const def = packsOf(product).find(d => d.id === pack) || packsOf(product)[0];
     const size = def.size;
-    const room = capQty(cart, { id: product.id, cartId: '', size }, product.stock);
-    if (product.stock <= 0) {
+    const left = availOf(product); // what is still free after what is already in the order
+    const room = capQty(cart, { id: product.id, cartId: '', size }, product.stock + creditOf(product.id));
+    if (left <= 0) {
       alert(`Warning: ${product.name} is finished (out of stock)!`);
       return;
     }
     if (room < 1) {
       alert(size > 1
-        ? `Not enough ${product.name} left for another ${def.label.toLowerCase()}. Only ${product.stock} ${product.unit} in stock.`
-        : `No more ${product.name} left to add (${product.stock} ${product.unit} in stock).`);
+        ? `Not enough ${product.name} left for another ${def.label.toLowerCase()}. Only ${left} ${product.unit} left.`
+        : `No more ${product.name} left to add (${left} ${product.unit} left).`);
       return;
     }
     setCart(prevCart => addLine(prevCart, product, variant, pack, 1));
@@ -740,26 +878,8 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
     const tendered = paymentMethod === 'cash' && amountReceived.trim() !== '' ? Number(amountReceived) : null;
     if (tendered !== null && (!isFinite(tendered) || tendered + 0.005 < grandTotal)) return;
 
-    // Deduct stock and increment units sold
-    setProducts(prevProducts => {
-      return prevProducts.map(prod => {
-        const inCart = cart.filter(c => c.id === prod.id);
-        if (inCart.length > 0) {
-          const totalQtyUsed = inCart.reduce((sum, item) => sum + bottlesOf(item), 0); // a box counts as all its bottles
-          const updatedStock = Math.max(0, prod.stock - totalQtyUsed);
-          
-          // Also update physical count default
-          setPhysicalCounts(prev => ({ ...prev, [prod.id]: updatedStock }));
-
-          return { 
-            ...prod, 
-            stock: updatedStock,
-            unitsSold: prod.unitsSold + totalQtyUsed 
-          };
-        }
-        return prod;
-      });
-    });
+    // Take the order out of stock (bottles a saved tab already took out are not taken again)
+    applyCartToStock(cart);
 
     // Build the sale record (it is the receipt, the history entry AND the outbox payload)
     const saleTime = new Date();
@@ -826,20 +946,35 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
       'It will disappear from the Terminal, the stock list and End of Day. Old sales, refunds and reports will still show it.',
       p.stock > 0 ? `Its remaining ${p.stock} ${p.unit || 'units'} (worth ${money(p.stock * (p.cost || 0))} at cost price) will no longer be counted.` : '',
       tabsUsing ? `Warning: ${tabsUsing} open tab(s) still have this item. They can still be paid.` : '',
-      '', 'You can bring it back later from "Deleted items".',
+      '', `It goes to the Bin. You can bring it back from there for ${BIN_DAYS} days, then it is deleted for good.`,
     ].filter((l, i, a) => l !== '' || a[i - 1] !== '');
     if (!window.confirm(lines.join('\n'))) return;
     setCart((prev: any[]) => prev.filter(i => i.id !== p.id));
     setProducts((prev: any[]) => prev.map(x => (x.id === p.id ? { ...x, archived: true, archivedAt: Date.now(), archivedBy: user.name } : x)));
   };
   const handleRestoreItem = (p: any) => {
-    if (!isOwner) return;
+    if (!isOwner || p.purged) return;
     setProducts((prev: any[]) => prev.map(x => {
       if (x.id !== p.id) return x;
       const { archived, archivedAt, archivedBy, ...rest } = x;
       return rest;
     }));
   };
+  // Removing for good. The row itself must stay (old sales, refunds and the cloud sync still point at it, and a hard-deleted row
+  // would be brought back by another device), so it becomes an empty tombstone: it leaves the Bin, can no longer be restored,
+  // frees its item code and drops its photo. Stock numbers are left alone so no stock movement is created.
+  const purgeProduct = (x: any) => { const { photo: _photo, ...rest } = x; return { ...rest, purged: true, purgedAt: Date.now() }; };
+  const handleDeleteForever = (p: any) => {
+    if (!isOwner) return;
+    if (!window.confirm(`Delete \"${p.name}\" for good now? It cannot be brought back.`)) return;
+    setProducts((prev: any[]) => prev.map(x => (x.id === p.id && x.archived ? purgeProduct(x) : x)));
+  };
+  // Automatic: anything that has been in the Bin for BIN_DAYS days is removed for good (checked every 30 seconds while the app is open).
+  useEffect(() => {
+    const due = (x: any) => x.archived && !x.purged && x.archivedAt && x.archivedAt <= Date.now() - BIN_DAYS * DAY_MS;
+    if (!products.some(due)) return;
+    setProducts((prev: any[]) => prev.map(x => (due(x) ? purgeProduct(x) : x)));
+  }, [products, nowTs]);
 
   // Inventory: edit an existing product (owner). Stock counts are changed through Restock / End of Day, never here.
   const handleSaveEdit = (changes: any) => {
@@ -854,10 +989,10 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
     if (!newItem.name || !newItem.price) return;
     const sku = String(newItem.sku || '').trim().toLowerCase();
     if (sku) {
-      const clash = products.find((p: any) => String(p.sku).toLowerCase() === sku);
+      const clash = products.find((p: any) => !p.purged && String(p.sku).toLowerCase() === sku);
       if (clash) {
         alert(clash.archived
-          ? `The item code "${newItem.sku}" belongs to a deleted item (${clash.name}). Restore that item from "Deleted items" instead of adding it again.`
+          ? `The item code "${newItem.sku}" belongs to an item in the Bin (${clash.name}). Restore it from the Bin instead of adding it again.`
           : `The item code "${newItem.sku}" is already used by ${clash.name}.`);
         return;
       }
@@ -928,11 +1063,92 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
     };
   }, [products, physicalCounts, scopedProducts]);
 
+  // The complete record of one shift (closed, or the one still open), worked out from that same shift's own sales, refunds and expenses.
+  const shiftReport = (sh: any) => {
+    const dev = sh.deviceId || deviceId;
+    const from = sh.openedAt, to = sh.closedAt ?? Date.now();
+    const key = `${dev}:${sh.openedAt}`;
+    const costOf = new Map<string, number>(products.map((p: any) => [p.id, p.cost || 0]));
+    const sales = salesHistory.filter((x: any) => x.ts >= from && x.ts <= to && (!x.deviceId || x.deviceId === dev)).sort((a: any, b: any) => a.ts - b.ts);
+    const refs = refunds.filter((x: any) => x.shiftKey === key).sort((a: any, b: any) => a.ts - b.ts);
+    const exps = liveExpenses.filter((x: any) => x.shiftKey === key).sort((a: any, b: any) => a.ts - b.ts);
+    const buys = liveStockBuys.filter((x: any) => x.shiftKey === key).sort((a: any, b: any) => a.ts - b.ts);
+    const methodOf = (x: any) => x.method || x.paymentMethod || 'cash';
+
+    const grossSold = sales.reduce((a: number, x: any) => a + (x.total || 0), 0);
+    const refundTotal = refs.reduce((a: number, x: any) => a + (x.amount || 0), 0);
+    const byMethod: Record<string, number> = { cash: 0, mobile: 0, card: 0 };
+    sales.forEach((x: any) => { byMethod[methodOf(x)] = (byMethod[methodOf(x)] || 0) + (x.total || 0); });
+    refs.forEach((x: any) => { byMethod[x.method] = (byMethod[x.method] || 0) - (x.amount || 0); });
+
+    // cost of goods: what was sold, minus the cost of refunded items that went back on the shelf
+    let cogs = 0;
+    sales.forEach((x: any) => (x.items || []).forEach((i: any) => { cogs += (i.qty || 0) * (i.cost ?? costOf.get(i.productId) ?? 0); }));
+    refs.forEach((x: any) => (x.lines || []).filter((l: any) => l.restock).forEach((l: any) => { cogs -= (l.qty || 0) * (l.cost ?? costOf.get(l.productId) ?? 0); }));
+
+    const itemMap = new Map<string, any>();
+    sales.forEach((x: any) => (x.items || []).forEach((i: any) => {
+      const label = [i.name, i.variant, i.pack && i.pack !== 'single' ? (i.packUnit || i.pack) : null].filter(Boolean).join(' · ');
+      const k = `${i.productId}|${i.variant || ''}|${i.pack || 'single'}`;
+      const r = itemMap.get(k) || { name: label, qty: 0, bottles: 0, revenue: 0, cost: 0 };
+      r.qty += i.qty || 0; r.bottles += (i.qty || 0) * (i.size || 1); r.revenue += (i.price || 0) * (i.qty || 0);
+      r.cost += (i.qty || 0) * (i.cost ?? costOf.get(i.productId) ?? 0);
+      itemMap.set(k, r);
+    }));
+    const staffMap = new Map<string, any>();
+    sales.forEach((x: any) => {
+      const k = x.cashierId || x.cashier || '?';
+      const r = staffMap.get(k) || { name: x.cashier || 'Unknown', count: 0, total: 0, cash: 0, mobile: 0, card: 0 };
+      r.count += 1; r.total += x.total || 0; r[methodOf(x)] = (r[methodOf(x)] || 0) + (x.total || 0);
+      staffMap.set(k, r);
+    });
+    const expenseTotal = exps.reduce((a: number, x: any) => a + (x.amount || 0), 0);
+    const tillOut = exps.filter((x: any) => x.paidFrom === 'till').reduce((a: number, x: any) => a + (x.amount || 0), 0)
+      + buys.reduce((a: number, x: any) => a + (x.amount || 0), 0);
+    const cashSales = (byMethod.cash || 0);
+    const closed = sh.closedAt != null;
+    const float = closed ? (sh.cashFloat || 0) : cashFloatNum;
+    const expected = closed ? (sh.cashExpected ?? float + cashSales - tillOut) : cashExpected;
+    const counted = closed ? (sh.cashCounted ?? null) : cashCountedNum;
+    const writeOffs = stockLog.filter((l: any) => l.type === 'adjust_out' && l.loss && l.ts >= from && l.ts <= to); // spilled, expired, staff use... recorded by the owner
+    const shrinkValue = r2n((closed ? (sh.shrinkageValue || 0) : eodMetrics.totalShrinkageValue) + writeOffs.reduce((a: number, l: any) => a + (l.qty || 0) * (l.cost || 0), 0));
+    const shrinkUnits = (closed ? (sh.shrinkageUnits || 0) : eodMetrics.totalShrinkageUnits) + writeOffs.reduce((a: number, l: any) => a + (l.qty || 0), 0);
+    const netSales = grossSold - refundTotal;
+    const grossProfit = netSales - cogs;
+    const drawerRows = drawers.filter((d: any) => d.openedAt >= from && d.openedAt <= to && (!d.deviceId || d.deviceId === dev))
+      .map((d: any) => ({ staffName: d.staffName, float: d.float || 0, salesCount: d.salesCount || 0, cashSales: d.cashSales || 0, expected: d.expected || 0, counted: d.counted || 0, variance: d.variance || 0 }));
+    return {
+      openedAt: from, closedAt: closed ? sh.closedAt : null, closedBy: sh.closedBy || null, deviceName: sh.deviceName || null,
+      salesCount: sales.length, grossSold: r2n(grossSold), refundTotal: r2n(refundTotal), refundCount: refs.length, netSales: r2n(netSales),
+      byMethod: { cash: r2n(byMethod.cash || 0), mobile: r2n(byMethod.mobile || 0), card: r2n(byMethod.card || 0) },
+      cogs: r2n(cogs), grossProfit: r2n(grossProfit), expenseTotal: r2n(expenseTotal), shrinkValue, shrinkUnits,
+      netProfit: r2n(grossProfit - expenseTotal - shrinkValue),
+      cash: { float, sales: r2n(cashSales), tillOut: r2n(tillOut), expected, counted, variance: counted == null ? null : r2n(counted - expected) },
+      expenses: exps.map((x: any) => ({ ...x, paidFromLabel: PAID_FROM.find((f: any) => f.id === x.paidFrom)?.label || x.paidFrom || '' })),
+      stockBuys: buys,
+      items: [...itemMap.values()].sort((a, b) => b.revenue - a.revenue),
+      staff: [...staffMap.values()].sort((a, b) => b.total - a.total),
+      refundRows: refs.map((x: any) => ({ ...x })),
+      drawers: drawerRows,
+      sales,
+      stock: sh.stock || (closed ? null : scopedProducts.map((p: any) => ({ name: p.name, start: p.startingStock, sold: p.unitsSold, expected: p.stock, actual: physicalCounts[p.id] !== undefined ? physicalCounts[p.id] : p.stock }))),
+      tabsOpen: sh.tabsOpen || null,
+    };
+  };
+  // profit per closed shift, for the list (worked out once, not on every keystroke)
+  const closedShiftProfit = useMemo(() => {
+    const m = new Map<string, any>();
+    closedShifts.forEach((c: any) => { const r = shiftReport(c); m.set(c.id, { cogs: r.cogs, net: r.netProfit, expenses: r.expenseTotal, gross: r.grossProfit, report: r }); });
+    return m;
+  }, [closedShifts, salesHistory, refunds, liveExpenses, liveStockBuys, products, stockLog]);
+
   // End of Day: close the shift, record the totals, lock the register
   const handleCloseShift = () => {
     const warn = openTabs.length > 0 ? `\n\n${openTabs.length} tab(s) are still open and will stay open for the next shift.` : '';
     const noCount = cashCountedNum === null ? '\n\nYou have not typed the cash you counted, so we cannot check if cash is missing or extra.' : '';
-    const exp = `\n\nExpenses saved this shift: ${money(shiftExpenseTotals.total)} (${shiftExpenseList.length} entr${shiftExpenseList.length === 1 ? 'y' : 'ies'}).\nDid you add ALL of tonight's expenses?${noCount}`;
+    const stillOpen = Object.values(openDrawers).map((d: any) => d.staffName);
+    const drw = stillOpen.length ? `\n\nStaff drawers still open: ${stillOpen.join(', ')}. Ask them to count and hand in their cash.` : '';
+    const exp = `\n\nExpenses saved this shift: ${money(shiftExpenseTotals.total)} (${shiftExpenseList.length} entr${shiftExpenseList.length === 1 ? 'y' : 'ies'}).\nDid you add ALL of tonight's expenses?${noCount}${drw}`;
     if (!window.confirm(`Close the shift now? Sales will be added up and the till will be locked.${exp}${warn}`)) return;
     const byMethod: Record<string, number> = { cash: 0, mobile: 0, card: 0 };
     shiftSales.forEach((s: any) => { byMethod[s.method] = (byMethod[s.method] || 0) + s.total; });
@@ -950,6 +1166,9 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
       shrinkageUnits: eodMetrics.totalShrinkageUnits,
       shrinkageValue: eodMetrics.totalShrinkageValue,
       cashFloat: cashFloatNum, cashExpected, cashCounted: cashCountedNum, cashVariance, // null when no count was entered
+      // saved so the shift can be checked later exactly as it was at close
+      stock: scopedProducts.map((p: any) => ({ name: p.name, sku: p.sku, start: p.startingStock, sold: p.unitsSold, expected: p.stock, actual: physicalCounts[p.id] !== undefined ? physicalCounts[p.id] : p.stock })),
+      tabsOpen: { count: openTabs.length, total: r2n(openTabs.reduce((a: number, t: any) => a + (t.balance || 0), 0)) },
       closedBy: user.name,
       deviceId,
       deviceName,
@@ -958,6 +1177,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
     setClosedShifts((prev: any[]) => [shift, ...prev]);
     setOutbox((prev: any[]) => [...prev, { id: shift.id, table: 'closed_shifts', payload: { ...shift, storeId }, failed: false }]);
     setIsEodLocked(true);
+    setViewShift(shift); // show the complete record of the shift that was just closed
   };
 
   // Start a new shift: counted stock becomes the new opening stock
@@ -1047,8 +1267,10 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
               { id: 'pos', label: 'Terminal', icon: ShoppingBag, owner: false },
               { id: 'tabs', label: 'Open Bar Tabs', icon: Users, owner: false },
               { id: 'sales', label: 'Sales & Refunds', icon: RotateCcw, owner: false },
+              { id: 'reprint', label: 'Reprint Receipt', icon: Printer, owner: false },
               { id: 'inventory', label: 'Stock Tracking', icon: Package, owner: false },
               { id: 'expenses', label: 'Expenses', icon: Wallet, owner: false },
+              { id: 'drawer', label: isOwner ? 'Staff Drawers' : 'My Drawer', icon: Banknote, owner: false },
               { id: 'eod', label: 'End of Day (EOD)', icon: ClipboardList, owner: true },
               { id: 'calendar', label: 'Calendar', icon: CalendarDays, owner: false },
               { id: 'analytics', label: 'Analytics & COGS', icon: BarChart3, owner: true },
@@ -1069,6 +1291,9 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                 </div>
                 {item.id === 'tabs' && openTabs.length > 0 && isWide && (
                   <span className="px-2 py-0.5 text-xs font-bold rounded-full bg-amber-500 text-slate-950">{openTabs.length}</span>
+                )}
+                {item.id === 'drawer' && needsDrawer && (
+                  <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-rose-500 text-white">{isWide ? 'Open it' : '!'}</span>
                 )}
               </button>
             ))}
@@ -1155,6 +1380,12 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
             {/* Catalog Section */}
             <div className="flex-1 min-w-0 flex flex-col p-4 lg:p-6 overflow-hidden border-r border-slate-800">
               
+              {needsDrawer && (
+                <button onClick={() => setActiveTab('drawer')} className="mb-4 w-full text-left px-4 py-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-400 text-sm font-bold flex items-center gap-2">
+                  <AlertCircle className="h-4 w-4 shrink-0" /> Open your drawer before you take payment. Tap here.
+                </button>
+              )}
+
               {/* Header Controls: Mode Switcher & Search */}
               <div className="flex flex-col md:flex-row gap-4 justify-between items-center mb-6">
                 
@@ -1238,8 +1469,10 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
               {/* Product Grid */}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: 16, alignContent: 'start' }} className="flex-1 overflow-y-auto pr-1">
                 {filteredProducts.map(product => {
-                  const isLowStock = product.stock <= product.minThreshold && product.stock > 0;
-                  const isOutOfStock = product.stock <= 0;
+                  // Live count: what is still free after what staff already clicked into the order
+                  const left = availOf(product);
+                  const isLowStock = left <= product.minThreshold && left > 0;
+                  const isOutOfStock = left <= 0;
 
                   return (
                     <div
@@ -1258,7 +1491,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                               ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' 
                               : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
                           }`}>
-                            {isOutOfStock ? 'Out of Stock' : `${stockText(product)} left`}
+                            {isOutOfStock ? 'Out of Stock' : `${stockText({ ...product, stock: left })} left`}
                           </span>
                         </div>
                         <h3 className="font-bold text-slate-100 text-sm group-hover:text-amber-400 transition-colors line-clamp-2">{product.name}</h3>
@@ -1305,7 +1538,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                             {packsOf(product).map(d => (
                               <button
                                 key={d.id}
-                                disabled={product.stock < d.size}
+                                disabled={left < d.size}
                                 onClick={() => addToCart(product, null, d.id)}
                                 className={d.id === 'single'
                                   ? 'py-2 bg-slate-800 hover:bg-amber-500 hover:text-slate-950 text-slate-200 font-bold text-[11px] rounded-xl transition-all flex items-center justify-center gap-1 disabled:opacity-40'
@@ -1342,7 +1575,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                 </div>
                 {cart.length > 0 && (
                   <button
-                    onClick={() => setCart([])}
+                    onClick={() => { setCart([]); setCartCredit({}); }}
                     className="text-xs text-rose-400 hover:text-rose-300 font-semibold"
                   >
                     Clear All
@@ -1469,7 +1702,8 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
 
                   <button
                     disabled={cart.length === 0 || isEodLocked}
-                    onClick={() => setIsCheckoutOpen(true)}
+                    onClick={() => (needsDrawer ? setActiveTab('drawer') : setIsCheckoutOpen(true))}
+                    title={needsDrawer ? 'Open your drawer first' : undefined}
                     className="w-full py-3 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 disabled:opacity-50 text-slate-950 font-extrabold text-sm rounded-xl shadow-lg shadow-amber-500/20 transition-all flex items-center justify-center gap-1.5"
                   >
                     <CreditCard className="h-4 w-4" /> Pay Now
@@ -1545,6 +1779,13 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                               cost: ti.cost ?? match.cost,
                             };
                           });
+                          // Tabs saved by this version already left stock; older tabs still come out of stock when paid.
+                          const credit: Record<string, number> = {};
+                          if (tab.stockDeducted) tab.items.forEach((ti: any) => {
+                            const pid = (products.find((p: any) => p.id === ti.productId) || products.find((p: any) => p.name === ti.name))?.id;
+                            if (pid) credit[pid] = (credit[pid] || 0) + (Number(ti.qty) || 0) * (Number(ti.size) || 1);
+                          });
+                          setCartCredit(credit);
                           setCart(loadedCart);
                           setCustomerName(tab.customer);
                           setOpenTabs(openTabs.filter(t => t.id !== tab.id));
@@ -1654,10 +1895,16 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                           </td>
                           <td className="px-6 py-4 text-right">
                             <button
-                              onClick={() => { setRestockItem(product); setRestockForm({ qty: '', cost: '', by: hasBox(product) ? 'box' : 'bottle' }); }}
+                              onClick={() => { setRestockItem(product); setRestockForm({ qty: '', cost: '', by: hasBox(product) ? 'box' : 'bottle', buyId: '' }); }}
                               className={`px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap ${isOut || isLow ? 'bg-amber-500 text-slate-950' : 'bg-slate-800 text-slate-200 hover:bg-slate-700'}`}
                             >
                               + Restock
+                            </button>
+                            <button
+                              onClick={() => { setAdjustItem(product); setAdjustForm({ dir: 'out', by: 'bottle', qty: '', reason: 'damaged', note: '' }); }}
+                              className="ml-2 px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap bg-slate-800 text-slate-200 hover:bg-slate-700"
+                            >
+                              ± Adjust
                             </button>
                             <button
                               onClick={() => setEditItem(product)}
@@ -1685,7 +1932,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
               {isOwner && deletedProducts.length > 0 && (
                 <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-3">
                   <button onClick={() => setShowDeleted(v => !v)} className="w-full flex items-center justify-between text-left">
-                    <span className="font-bold text-slate-200 text-sm">Deleted items ({deletedProducts.length})</span>
+                    <span className="font-bold text-slate-200 text-sm flex items-center gap-2"><Trash2 className="h-4 w-4 text-slate-400" /> Bin ({deletedProducts.length})</span>
                     <span className="text-xs font-bold text-amber-400">{showDeleted ? 'Hide' : 'Show'}</span>
                   </button>
                   {showDeleted && (
@@ -1697,12 +1944,16 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                             <div className="min-w-0">
                               <p className="text-sm font-bold text-slate-300 truncate">{p.name}</p>
                               <p className="text-[11px] text-slate-500">{p.sku} · {p.stock} {p.unit} left{p.archivedAt ? ` · deleted ${new Date(p.archivedAt).toLocaleDateString()}` : ''}{p.archivedBy ? ` by ${p.archivedBy}` : ''}</p>
+                              {p.archivedAt && (() => { const left = Math.max(0, Math.ceil((p.archivedAt + BIN_DAYS * DAY_MS - nowTs) / DAY_MS)); return <p className={`text-[11px] font-bold ${left <= 1 ? 'text-rose-400' : 'text-amber-400'}`}>{left <= 0 ? 'Deleted for good soon' : `Deleted for good in ${left} day${left === 1 ? '' : 's'}`}</p>; })()}
                             </div>
                           </div>
-                          <button onClick={() => handleRestoreItem(p)} className="shrink-0 px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-500 text-slate-950 hover:bg-amber-400">Restore</button>
+                          <div className="shrink-0 flex gap-2">
+                            <button onClick={() => handleDeleteForever(p)} className="px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-800 text-rose-300 hover:bg-rose-500 hover:text-white border border-slate-700">Delete now</button>
+                            <button onClick={() => handleRestoreItem(p)} className="px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-500 text-slate-950 hover:bg-amber-400">Restore</button>
+                          </div>
                         </div>
                       ))}
-                      <p className="text-[11px] text-slate-500">Restoring brings the item back with the same stock it had when it was deleted. Count it again at End of Day if needed.</p>
+                      <p className="text-[11px] text-slate-500">Deleted items stay in the Bin for {BIN_DAYS} days, then are deleted for good automatically. Restoring brings the item back with the same stock it had when it was deleted. Count it again at End of Day if needed.</p>
                     </div>
                   )}
                 </div>
@@ -1731,6 +1982,12 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                   >
                     <FileText className="h-4 w-4" /> See Full End of Day Report
                   </button>
+                  <button
+                    onClick={() => setViewShift({ id: 'open', openedAt: shiftStart, closedAt: null, deviceId, deviceName })}
+                    className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs rounded-xl flex items-center gap-2 border border-slate-700"
+                  >
+                    <ClipboardList className="h-4 w-4" /> Shift record so far
+                  </button>
 
                   <button
                     onClick={isEodLocked ? handleReopenShift : handleCloseShift}
@@ -1743,6 +2000,12 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                     <Lock className="h-4 w-4" /> {isEodLocked ? 'Start New Shift' : 'Close Shift'}
                   </button>
                 </div>
+              </div>
+
+              {/* The shift's money in short, plain words */}
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-3">
+                <h3 className="text-lg font-extrabold text-slate-100">{isEodLocked ? 'Money of the shift you closed' : 'Money of this shift so far'}</h3>
+                <MoneySimple r={shiftReport({ id: 'open', openedAt: shiftStart, closedAt: null, deviceId, deviceName })} money={money} />
               </div>
 
               {/* Summary Cards */}
@@ -1831,6 +2094,23 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                     </div>
                   </div>
                 </div>
+                {(shiftDrawers.length > 0 || Object.keys(openDrawers).length > 0) && (
+                  <div className="border-t border-slate-800 pt-4 space-y-2">
+                    <p className="text-xs font-bold uppercase text-slate-500">Staff drawers this shift</p>
+                    {shiftDrawers.map((d: any) => (
+                      <div key={d.id} className="bg-slate-950/60 border border-slate-800 rounded-xl p-3 text-xs flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <p className="font-bold text-slate-200 text-sm">{d.staffName}</p>
+                          <p className="text-slate-500">Should have {money(d.expected)} · counted {money(d.counted)}</p>
+                        </div>
+                        <VerdictBadge verdict={verdictOf(d.variance)} variance={d.variance} money={money} />
+                      </div>
+                    ))}
+                    {Object.values(openDrawers).map((d: any) => (
+                      <p key={d.staffId} className="text-xs text-amber-400 flex items-center gap-1.5"><AlertCircle className="h-3.5 w-3.5" /> {d.staffName}'s drawer is still open.</p>
+                    ))}
+                  </div>
+                )}
                 {!isEodLocked && shiftExpenseList.length === 0 && (
                   <p className="text-xs text-amber-400 flex items-center gap-1.5"><AlertCircle className="h-3.5 w-3.5" /> No expenses recorded this shift. If money went out (ice, transport, wages), add it before closing.</p>
                 )}
@@ -1909,31 +2189,18 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
 
               {/* Closed shift history */}
               <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5">
-                <h3 className="font-bold text-slate-100 mb-3">Closed Shifts</h3>
+                <h3 className="font-bold text-slate-100 mb-1">Closed Shifts</h3>
+                <p className="text-xs text-slate-500 mb-3">Each closed shift shows the money in simple words. Newest is first.</p>
                 {closedShifts.length === 0 ? (
                   <p className="text-xs text-slate-500">No shifts closed yet. Close the shift at the end of the night to record it here.</p>
                 ) : (
                   <div className="space-y-2">
-                    {closedShifts.map((c: any) => (
-                      <div key={c.id} className="bg-slate-950/60 border border-slate-800 rounded-xl p-3 text-xs flex flex-wrap justify-between gap-2">
-                        <div>
-                          <p className="font-bold text-slate-200">{fmtDateTime(c.openedAt)} → {fmtDateTime(c.closedAt)}</p>
-                          <p className="text-slate-500">{c.count} sales · Bar {money(c.barSales)} · Wholesale {money(c.retailSales)}</p>
-                          <p className="text-slate-500">Cash {money(c.cash)} · Mobile {money(c.mobile)} · Card {money(c.card)}</p>
-                        </div>
-                        <div className="text-right">
-                          <p className="font-mono font-extrabold text-amber-400 text-base">{money(c.total)}</p>
-                          <p className="text-rose-400">Lost stock {money(c.shrinkageValue)} ({c.shrinkageUnits} units)</p>
-                          <p className="text-rose-400">Expenses -{money(expensesFor(c).total)}</p>
-                          <p className="text-slate-300 font-bold">Left after expenses {money(c.total - expensesFor(c).total)}</p>
-                          {c.cashVariance != null && (
-                            <p className={c.cashVariance === 0 ? 'text-emerald-400' : c.cashVariance < 0 ? 'text-rose-400' : 'text-amber-400'}>
-                              Cash {c.cashVariance === 0 ? 'correct' : c.cashVariance < 0 ? `missing ${money(Math.abs(c.cashVariance))}` : `extra ${money(c.cashVariance)}`}
-                            </p>
-                          )}
-                        </div>
-                      </div>
-                    ))}
+                    {closedShifts.map((c: any) => {
+                      const pr = closedShiftProfit.get(c.id);
+                      return pr?.report
+                        ? <ShiftMoneyCard key={c.id} r={pr.report} money={money} onOpen={() => setViewShift(c)} />
+                        : null;
+                    })}
                   </div>
                 )}
               </div>
@@ -1950,12 +2217,28 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
           />
         )}
 
+        {/* VIEW: REPRINT A LOST RECEIPT */}
+        {activeTab === 'reprint' && (
+          <ReprintView sales={salesHistory} isOwner={isOwner} user={user} money={money} fmtDateTime={fmtDateTime} onReprint={handleReprint} />
+        )}
+
         {/* VIEW: EXPENSES */}
         {activeTab === 'expenses' && (
           <ExpensesView
             shiftList={shiftExpenseList} shiftTotals={shiftExpenseTotals} allLive={liveExpenses} voidedIds={voidedIds}
             cashSales={shiftCashSales} isLocked={isEodLocked} isOwner={isOwner}
             onAdd={handleAddExpense} onVoid={handleVoidExpense}
+            money={money} fmtDateTime={fmtDateTime} currency={CURRENCY}
+          />
+        )}
+
+        {/* VIEW: STAFF DRAWERS (staff: my drawer / owner: every staff member) */}
+        {activeTab === 'drawer' && (
+          <DrawersView
+            isOwner={isOwner} user={user} staffList={drawerStaff} openDrawers={openDrawers} drawers={drawers} sales={salesHistory}
+            myOpen={myOpenDrawer} figuresFor={figuresFor} canOpen
+            stockBuys={liveStockBuys} stockLog={stockLog} onStockBuy={handleStockBuy} onVoid={handleVoidExpense}
+            onOpen={handleOpenDrawer} onClose={handleCloseDrawer}
             money={money} fmtDateTime={fmtDateTime} currency={CURRENCY}
           />
         )}
@@ -2188,12 +2471,25 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                 New stock: {stockText({ ...restockItem, stock: restockItem.stock + parseInt(restockForm.qty, 10) * (hasBox(restockItem) && restockForm.by === 'box' ? restockItem.boxQty : 1) })}
               </p>
             )}
-            {stockLog.filter((l: any) => l.productId === restockItem.id).length > 0 && (
+            {stockLog.filter((l: any) => l.productId === restockItem.id && l.type === 'restock').length > 0 && (
               <div className="text-[11px] text-slate-500 space-y-0.5">
                 <p className="font-bold uppercase">Recent deliveries</p>
-                {stockLog.filter((l: any) => l.productId === restockItem.id).slice(0, 3).map((l: any) => (
+                {stockLog.filter((l: any) => l.productId === restockItem.id && l.type === 'restock').slice(0, 3).map((l: any) => (
                   <p key={l.id}>{fmtDateTime(l.ts)} · +{l.qty} · {money(l.cost)} each · {l.by}</p>
                 ))}
+              </div>
+            )}
+            {liveStockBuys.filter((b: any) => b.paidFrom === 'till' && b.ts > Date.now() - 14 * DAY_MS).length > 0 && (
+              <div>
+                <label className="text-xs font-bold text-slate-400">Paid with drawer cash? (optional)</label>
+                <select value={restockForm.buyId} onChange={e => setRestockForm({ ...restockForm, buyId: e.target.value })}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-3 text-sm text-slate-100 mt-1 focus:outline-none focus:border-amber-500">
+                  <option value="">No, paid another way</option>
+                  {liveStockBuys.filter((b: any) => b.paidFrom === 'till' && b.ts > Date.now() - 14 * DAY_MS).map((b: any) => (
+                    <option key={b.id} value={b.id}>{money(b.amount)} · {b.by} · {fmtDateTime(b.ts)}{b.payee ? ` · ${b.payee}` : ''}</option>
+                  ))}
+                </select>
+                <p className="text-[11px] text-slate-500 mt-1">Links this delivery to the cash a staff member took from their drawer to buy it. The owner can then see where that money went.</p>
               </div>
             )}
             <button className="w-full py-3 bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold text-sm rounded-2xl">Add to stock</button>
@@ -2201,7 +2497,78 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
         </div>
       )}
 
-      {showStockHistory && <StockHistoryModal log={stockLog} money={money} fmtDateTime={fmtDateTime} onClose={() => setShowStockHistory(false)} />}
+      {adjustItem && isOwner && (() => {
+        const out = adjustForm.dir === 'out';
+        const qty = adjustQty(adjustItem);
+        const reasons: any[] = out ? ADJUST_OUT : ADJUST_IN;
+        const picked = reasons.find(r => r.id === adjustForm.reason) || reasons[0];
+        const recent = stockLog.filter((l: any) => l.productId === adjustItem.id && (l.type === 'adjust_in' || l.type === 'adjust_out')).slice(0, 4);
+        return (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <form onSubmit={handleAdjust} className="bg-slate-900 border border-slate-800 rounded-3xl max-w-sm w-full p-6 space-y-4 shadow-2xl text-slate-200 max-h-[94vh] overflow-y-auto">
+            <div className="flex justify-between items-start">
+              <div>
+                <h3 className="text-xl font-extrabold">Adjust Stock</h3>
+                <p className="text-xs text-slate-400">{adjustItem.name} · now {stockText(adjustItem)}</p>
+              </div>
+              <button type="button" onClick={() => setAdjustItem(null)} className="text-slate-500 hover:text-slate-300"><X className="h-5 w-5" /></button>
+            </div>
+            <div className="flex bg-slate-950 border border-slate-800 rounded-xl p-1 gap-1">
+              {[['out', 'Take off stock'], ['in', 'Put on stock']].map(([id, label]) => (
+                <button key={id} type="button" onClick={() => setAdjustForm({ ...adjustForm, dir: id, reason: id === 'out' ? 'damaged' : 'count' })}
+                  className={`flex-1 py-1.5 text-xs font-bold rounded-lg ${adjustForm.dir === id ? (id === 'out' ? 'bg-rose-500 text-white' : 'bg-emerald-500 text-slate-950') : 'text-slate-400'}`}>{label}</button>
+              ))}
+            </div>
+            {hasBox(adjustItem) && (
+              <div className="flex bg-slate-950 border border-slate-800 rounded-xl p-1 gap-1">
+                {[['box', `${nounOf(adjustItem) === 'crate' ? 'Crates' : 'Boxes'} (${adjustItem.boxQty} each)`], ['bottle', 'Single bottles']].map(([id, label]) => (
+                  <button key={id} type="button" onClick={() => setAdjustForm({ ...adjustForm, by: id })}
+                    className={`flex-1 py-1.5 text-xs font-bold rounded-lg ${adjustForm.by === id ? 'bg-amber-500 text-slate-950' : 'text-slate-400'}`}>{label}</button>
+                ))}
+              </div>
+            )}
+            <div>
+              <label className="text-xs font-bold text-slate-400">{hasBox(adjustItem) ? (adjustForm.by === 'box' ? (nounOf(adjustItem) === 'crate' ? 'Number of crates' : 'Number of boxes') : 'Number of bottles') : 'Quantity'}</label>
+              <input autoFocus type="number" min="1" required value={adjustForm.qty} onChange={e => setAdjustForm({ ...adjustForm, qty: e.target.value })}
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-lg font-mono text-slate-100 mt-1 focus:outline-none focus:border-amber-500" />
+            </div>
+            <div>
+              <label className="text-xs font-bold text-slate-400">Reason</label>
+              <select value={adjustForm.reason} onChange={e => setAdjustForm({ ...adjustForm, reason: e.target.value })}
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-3 text-sm text-slate-100 mt-1 focus:outline-none focus:border-amber-500">
+                {reasons.map(r => <option key={r.id} value={r.id}>{r.label}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="text-xs font-bold text-slate-400">Note (optional)</label>
+              <input value={adjustForm.note} onChange={e => setAdjustForm({ ...adjustForm, note: e.target.value })} placeholder="e.g. crate dropped at the back door"
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-100 mt-1 focus:outline-none focus:border-amber-500" />
+            </div>
+            {qty > 0 && (
+              <p className={`text-xs ${out && qty > adjustItem.stock ? 'text-rose-400' : out ? 'text-amber-400' : 'text-emerald-400'}`}>
+                {hasBox(adjustItem) && adjustForm.by === 'box' && <>{out ? 'Takes off' : 'Adds'} {qty} bottles. </>}
+                {out && qty > adjustItem.stock
+                  ? `Only ${stockText(adjustItem)} in stock.`
+                  : <>New stock: {stockText({ ...adjustItem, stock: adjustItem.stock + (out ? -qty : qty) })}</>}
+                {out && (picked as any).loss && qty <= adjustItem.stock && <> · counted as lost stock: {money(qty * (adjustItem.cost || 0))}</>}
+              </p>
+            )}
+            {recent.length > 0 && (
+              <div className="text-[11px] text-slate-500 space-y-0.5">
+                <p className="font-bold uppercase">Recent adjustments</p>
+                {recent.map((l: any) => (
+                  <p key={l.id}>{fmtDateTime(l.ts)} · {l.type === 'adjust_out' ? '-' : '+'}{l.qty} · {l.reason}{l.note ? ` (${l.note})` : ''} · {l.by}</p>
+                ))}
+              </div>
+            )}
+            <button className={`w-full py-3 font-extrabold text-sm rounded-2xl ${out ? 'bg-rose-500 hover:bg-rose-400 text-white' : 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'}`}>{out ? 'Take off stock' : 'Put on stock'}</button>
+          </form>
+        </div>
+        );
+      })()}
+
+      {viewShift && <ShiftRecordModal report={shiftReport(viewShift)} title={WS_LABEL} money={money} fmtDateTime={fmtDateTime} onClose={() => setViewShift(null)} onPrint={printHtml} />}
+      {showStockHistory && <StockHistoryModal log={stockLog.filter((l: any) => !l.type || l.type === 'restock')} money={money} fmtDateTime={fmtDateTime} onClose={() => setShowStockHistory(false)} />}
       {showSync && <SyncModal sync={sync} onClose={() => setShowSync(false)} />}
       {showBusiness && isOwner && <BusinessModal business={business} onSave={b => { setBusiness(b); setShowBusiness(false); }} onClose={() => setShowBusiness(false)} onTestPrint={b => printHtml(buildReceiptHtml(sampleReceipt(b, money, BRAND.product)))} />}
       {showTeam && isOwner && <TeamModal auth={auth} onClose={() => setShowTeam(false)} />}
@@ -2469,9 +2836,11 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                   openedTs: Date.now(),
                   balance: grandTotal,
                   openedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                  stockDeducted: true, // the items leave stock now; paying the tab later must not take them out again
                   items: cart.map(i => ({ productId: i.id, name: i.name, variant: i.selectedVariant || null, pack: i.pack || 'single', packUnit: i.packUnit || null, size: i.size || 1, cost: i.cost || 0, price: i.price, qty: i.qty }))
                 };
 
+                applyCartToStock(cart);
                 setOpenTabs([newTab, ...openTabs]);
                 setCart([]);
                 setCustomerName('');
@@ -2637,6 +3006,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
             <div className="text-center space-y-1 pb-3 border-b border-slate-800">
               <h3 className="font-extrabold text-lg text-slate-100">{bizName || BRAND.product}</h3>
               {businessLine(business) && <p className="text-[10px] text-slate-500">{businessLine(business)}</p>}
+              {(currentReceipt as any).isReprint && <p className="text-[11px] font-extrabold text-amber-400 border border-amber-500/40 rounded-lg py-1">DUPLICATE COPY</p>}
               <p className="text-xs text-slate-500">Receipt #{currentReceipt.txId}</p>
               <p className="text-[10px] text-slate-600 font-mono">{currentReceipt.date} • {currentReceipt.timestamp}</p>
             </div>
@@ -2689,7 +3059,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
 
             <div className="flex gap-2 pt-2">
               <button
-                onClick={() => printHtml(buildReceiptHtml({ ...currentReceipt, business, businessName: bizName || BRAND.product, footer: business.footer, product: BRAND.product, tax: currentReceipt.tax, taxPct: Math.round(TAX_RATE * 100), money }))}
+                onClick={() => printHtml(buildReceiptHtml({ ...receiptForOutput(currentReceipt), business, businessName: bizName || BRAND.product, product: BRAND.product, tax: currentReceipt.tax, taxPct: Math.round(TAX_RATE * 100), money }))}
                 className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs rounded-xl flex items-center justify-center gap-1.5"
               >
                 <Printer className="h-4 w-4" /> Print

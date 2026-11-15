@@ -33,7 +33,7 @@ export async function downloadExcel(o: Opts) {
   for (const [wsId, wsName] of WORKSPACES) {
     const S = readCollection(`${wsId}:salesHistory`).sort((a, b) => a.ts - b.ts);
     const R = readCollection(`${wsId}:refunds`).sort((a, b) => a.ts - b.ts);
-    const E = readCollection(`${wsId}:expenses`).sort((a, b) => a.ts - b.ts);
+    const E = readCollection(`${wsId}:expenses`).filter(e => e.kind !== 'stockbuy').sort((a, b) => a.ts - b.ts); // stock bought with drawer cash is not an expense (cost is counted when sold)
     const C = readCollection(`${wsId}:closedShifts`).sort((a, b) => a.openedAt - b.openedAt);
     const L = readCollection(`${wsId}:stockLog`).sort((a, b) => a.ts - b.ts);
     const P = readCollection(`${wsId}:products`);
@@ -102,11 +102,11 @@ export async function downloadExcel(o: Opts) {
       });
     });
 
-    L.forEach(l => stock.push({ ws: wsName, dt: new Date(l.ts), type: l.type === 'restock' ? 'Delivery / restock' : String(l.type || ''), product: l.name || '', qty: l.qty, cost: r2(l.cost), by: l.by || '' }));
+    L.forEach(l => stock.push({ ws: wsName, dt: new Date(l.ts), type: l.type === 'restock' ? 'Delivery / restock' : l.type === 'adjust_out' ? `Taken off: ${l.reason || ''}${l.note ? ` (${l.note})` : ''}` : l.type === 'adjust_in' ? `Put on: ${l.reason || ''}${l.note ? ` (${l.note})` : ''}` : String(l.type || ''), product: l.name || '', qty: l.type === 'adjust_out' ? -(l.qty || 0) : l.qty, cost: r2(l.cost), by: l.by || '' }));
     P.forEach(p => products.push({
       ws: wsName, sku: p.sku || '', name: p.name, category: p.subcategory || '', price: r2(p.price), cost: r2(p.cost), stock: p.stock ?? 0, opening: p.startingStock ?? 0,
       sold: p.unitsSold ?? 0, min: p.minThreshold ?? 0, boxQty: p.boxQty || '', boxPrice: p.boxPrice ? r2(p.boxPrice) : '', boxCost: p.boxCost ? r2(p.boxCost) : '',
-      archived: p.archived ? 'Deleted/hidden' : 'Active',
+      archived: p.purged ? 'Deleted for good' : p.archived ? 'In the Bin' : 'Active',
     }));
   }
 
