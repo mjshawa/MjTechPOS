@@ -31,11 +31,11 @@ export function VerdictBadge({ verdict, variance, money, compact }: { verdict: V
 }
 
 export default function DrawersView({
-  isOwner, user, staffList, openDrawers, drawers, sales, myOpen, figuresFor, canOpen,
+  isOwner, user, staffList, openDrawers, drawers, sales, refunds = [], myOpen, figuresFor, canOpen,
   stockBuys, stockLog, onStockBuy, onVoid, onOpen, onClose, money, fmtDateTime, currency,
 }: {
   isOwner: boolean; user: { id: string; name: string }; staffList: { id: string; name: string; role?: string }[];
-  openDrawers: Record<string, OpenDrawer>; drawers: any[]; sales: any[]; myOpen: OpenDrawer | null;
+  openDrawers: Record<string, OpenDrawer>; drawers: any[]; sales: any[]; refunds?: any[]; myOpen: OpenDrawer | null;
   figuresFor: (d: OpenDrawer) => Figures; canOpen: boolean;
   stockBuys: any[]; stockLog: any[]; onStockBuy: (f: { amount: number; supplier: string; note: string }) => void; onVoid: (e: any) => void;
   onOpen: (float: number) => void; onClose: (counted: number, d: OpenDrawer) => void;
@@ -180,6 +180,11 @@ export default function DrawersView({
   }
 
   // ───────────── OWNER VIEW ─────────────
+  // Money taken in the chosen period, by how it was paid (all staff and the owner, refunds already taken off)
+  const moneyBy = { cash: 0, mobile: 0, card: 0 } as Record<string, number>;
+  sales.filter(x => x.ts >= from).forEach(x => { const m = x.method || x.paymentMethod || 'cash'; moneyBy[m] = (moneyBy[m] || 0) + (x.total || 0); });
+  refunds.filter(x => x.ts >= from).forEach(x => { moneyBy[x.method] = (moneyBy[x.method] || 0) - (x.amount || 0); });
+  const moneyTotal = Object.values(moneyBy).reduce((a, b) => a + b, 0);
   const total = records.reduce((a, r) => ({
     counted: a.counted + r.counted, ok: a.ok + r.ok, bad: a.bad + r.bad, short: a.short + r.shortTotal, over: a.over + r.overTotal, noCount: a.noCount + r.noCountDays,
   }), { counted: 0, ok: 0, bad: 0, short: 0, over: 0, noCount: 0 });
@@ -229,6 +234,13 @@ export default function DrawersView({
               <button key={id} onClick={() => setPeriod(id)} className={`px-3 py-1.5 rounded-lg text-xs font-bold ${period === id ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-slate-200'}`}>{label}</button>
             ))}
           </div>
+        </div>
+
+        <div style={grid}>
+          {kpi('Cash', money(moneyBy.cash), 'text-emerald-400', 'All sales paid in cash')}
+          {kpi('Mobile money', money(moneyBy.mobile), 'text-emerald-400', 'All sales paid by mobile money')}
+          {kpi('Card', money(moneyBy.card), 'text-emerald-400', 'All sales paid by card')}
+          {kpi('Total money in', money(moneyTotal), 'text-amber-400', 'Cash + mobile + card, after refunds')}
         </div>
 
         <div style={grid}>

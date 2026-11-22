@@ -67,6 +67,7 @@ import TeamModal from './auth/TeamModal';
 import CalendarView from './CalendarView';
 import StockHistoryModal from './StockHistoryModal';
 import ShiftRecordModal from './ShiftRecordModal';
+import MySalesView from './MySalesView';
 import MoneySimple, { ShiftMoneyCard } from './MoneySimple';
 import ReprintView from './ReprintView';
 import ExpensesView, { PAID_FROM } from './ExpensesView';
@@ -278,6 +279,8 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
   // Cash drawer: opening float is entered at shift start, counted cash at the end. Both are saved on the device.
   const [cashFloat, setCashFloat] = usePersistentState(`${workspace}:cashFloat`, '');
   const [cashCounted, setCashCounted] = usePersistentState(`${workspace}:cashCounted`, '');
+  // Staff count the shelf BLIND (the screen never shows what the system expects). This remembers which items already have a typed count.
+  const [countTouched, setCountTouched] = usePersistentState(`${workspace}:countTouched`, {});
   const [profitPeriod, setProfitPeriod] = useState('7d');
 
   // New Item State for Inventory
@@ -329,6 +332,11 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
   const rolling24h = useMemo(
     () => salesHistory.filter((s: any) => s.ts > nowTs - DAY_MS).reduce((a: number, s: any) => a + s.total, 0),
     [salesHistory, nowTs]
+  );
+  // Sidebar "24h": the last 24 hours, but never before the current shift began, so it goes back to zero when a shift is closed.
+  const sidebar24h = useMemo(
+    () => salesHistory.filter((s: any) => s.ts > Math.max(nowTs - DAY_MS, shiftStart)).reduce((a: number, s: any) => a + s.total, 0),
+    [salesHistory, nowTs, shiftStart]
   );
   // Current-shift sales (since last EOD close)
   const shiftSales = useMemo(
@@ -634,7 +642,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
   };
 
   // Staff can only use Terminal + Tabs
-  useEffect(() => { if (!isOwner && !['pos', 'tabs', 'sales', 'reprint', 'inventory', 'expenses', 'drawer', 'calendar'].includes(activeTab)) setActiveTab('pos'); }, [isOwner, activeTab]);
+  useEffect(() => { if (!isOwner && !['pos', 'tabs', 'sales', 'reprint', 'inventory', 'expenses', 'drawer', 'mysales', 'eod'].includes(activeTab)) setActiveTab('pos'); }, [isOwner, activeTab]);
 
   // Calendar feed: every closed shift + the shift still open
   const openShiftSummary = useMemo(() => {
@@ -953,6 +961,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
       ...prev,
       [productId]: isNaN(parsed) ? 0 : parsed
     }));
+    setCountTouched((prev: any) => ({ ...prev, [productId]: val !== '' && !isNaN(parsed) }));
   };
 
   // Inventory: delete = hide (owner only). It can be restored; history is kept.
@@ -1162,8 +1171,15 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
 
   // End of Day: close the shift, record the totals, lock the register
   const handleCloseShift = () => {
+    if (isOwner) return; // counting and closing is done from the staff login; the owner only reviews
+    if (myOpenDrawer) { alert('Hand in your cash drawer first (My Drawer), then close the shift.'); return; }
+    const notCounted = scopedProducts.filter((p: any) => !countTouched[p.id]);
+    if (notCounted.length) {
+      alert(`Count every item before closing the shift.\n\nStill to count (${notCounted.length}): ${notCounted.slice(0, 6).map((p: any) => p.name).join(', ')}${notCounted.length > 6 ? '…' : ''}\n\nIf an item is finished, type 0.`);
+      return;
+    }
     const warn = openTabs.length > 0 ? `\n\n${openTabs.length} tab(s) are still open and will stay open for the next shift.` : '';
-    const noCount = cashCountedNum === null ? '\n\nYou have not typed the cash you counted, so we cannot check if cash is missing or extra.' : '';
+    const noCount = ''; // each staff member's cash is counted in My Drawer
     const stillOpen = Object.values(openDrawers).map((d: any) => d.staffName);
     const drw = stillOpen.length ? `\n\nStaff drawers still open: ${stillOpen.join(', ')}. Ask them to count and hand in their cash.` : '';
     const exp = `\n\nExpenses saved this shift: ${money(shiftExpenseTotals.total)} (${shiftExpenseList.length} entr${shiftExpenseList.length === 1 ? 'y' : 'ies'}).\nDid you add ALL of tonight's expenses?${noCount}${drw}`;
@@ -1194,8 +1210,10 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
     };
     setClosedShifts((prev: any[]) => [shift, ...prev]);
     setOutbox((prev: any[]) => [...prev, { id: shift.id, table: 'closed_shifts', payload: { ...shift, storeId }, failed: false }]);
-    setIsEodLocked(true);
-    setViewShift(shift); // show the complete record of the shift that was just closed
+    // The closed shift is saved above. Roll straight into a NEW shift that starts from zero:
+    // counted stock becomes the opening stock, sales / money / counts for the new day start empty until the next close.
+    handleReopenShift();
+    alert('Shift closed and saved. A new shift has started from zero.');
   };
 
   // Start a new shift: counted stock becomes the new opening stock
@@ -1208,6 +1226,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
     setShiftStart(Date.now());
     setCashFloat('');
     setCashCounted('');
+    setCountTouched({});
     setIsEodLocked(false);
   };
 
@@ -1289,10 +1308,11 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
               { id: 'inventory', label: 'Stock Tracking', icon: Package, owner: false },
               { id: 'expenses', label: 'Expenses', icon: Wallet, owner: false },
               { id: 'drawer', label: isOwner ? 'Staff Drawers' : 'My Drawer', icon: Banknote, owner: false },
-              { id: 'eod', label: 'End of Day (EOD)', icon: ClipboardList, owner: true },
-              { id: 'calendar', label: 'Calendar', icon: CalendarDays, owner: false },
+              { id: 'eod', label: isOwner ? 'End of Day (EOD)' : 'Count & Close Shift', icon: ClipboardList, owner: false },
+              { id: 'mysales', label: 'My Sales & Calendar', icon: CalendarDays, owner: false, staffOnly: true },
+              { id: 'calendar', label: 'Calendar', icon: CalendarDays, owner: true },
               { id: 'analytics', label: 'Analytics & COGS', icon: BarChart3, owner: true },
-            ].filter(i => !i.owner || isOwner).map(item => (
+            ].filter((i: any) => (!i.owner || isOwner) && (!i.staffOnly || !isOwner)).map((item: any) => (
               <button
                 key={item.id}
                 onClick={() => setActiveTab(item.id)}
@@ -1367,7 +1387,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
               <p className="font-bold text-slate-200 truncate">{user.name}</p>
               <p className="text-slate-500 capitalize">{user.role} · {isEodLocked ? 'Shift closed' : 'Shift open'}</p>
               <p className="text-slate-500">{WS_LABEL} workspace</p>
-              {isOwner && <p className="text-amber-400 font-mono" title="All registers combined">24h: {money(rolling24h)}</p>}
+              {isOwner && <p className="text-amber-400 font-mono" title="Last 24 hours. Starts again from zero when a shift is closed.">24h: {money(sidebar24h)}</p>}
               <button onClick={() => setShowSync(true)} className={`block text-left hover:text-slate-200 ${sync.failed > 0 ? 'text-rose-400' : sync.pending > 0 ? 'text-amber-400' : 'text-slate-500'}`}>
                 {sync.label}
               </button>
@@ -2026,10 +2046,11 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                   <h2 className="text-2xl font-extrabold text-slate-100 flex items-center gap-2">
                     <ClipboardList className="h-6 w-6 text-amber-400" /> End of Day: Count and Close
                   </h2>
-                  <p className="text-sm text-slate-400">Count your stock, see what is missing, and close the shift.</p>
+                  <p className="text-sm text-slate-400">{isOwner ? 'Staff count the stock and close the shift. You can only look at it here.' : 'Count every item on the shelf, type what you counted, then close the shift.'}</p>
                 </div>
 
                 <div className="flex items-center gap-3">
+                  {isOwner && (<>
                   <button
                     onClick={() => setEodSummaryModal(true)}
                     className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs rounded-xl flex items-center gap-2 border border-slate-700"
@@ -2043,6 +2064,8 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                     <ClipboardList className="h-4 w-4" /> Shift record so far
                   </button>
 
+                  </>)}
+                  {!isOwner && (
                   <button
                     onClick={isEodLocked ? handleReopenShift : handleCloseShift}
                     className={`px-5 py-2.5 font-extrabold text-xs rounded-xl flex items-center gap-2 transition-all shadow-lg ${
@@ -2053,9 +2076,24 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                   >
                     <Lock className="h-4 w-4" /> {isEodLocked ? 'Start New Shift' : 'Close Shift'}
                   </button>
+                  )}
                 </div>
               </div>
 
+              {!isOwner && (
+                <div className={`rounded-2xl border p-4 text-sm flex items-center gap-2 ${isEodLocked ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300' : 'bg-slate-900 border-slate-800 text-slate-300'}`}>
+                  {isEodLocked
+                    ? <><CheckCircle className="h-4 w-4 shrink-0" /> The shift is closed and your count is saved. Tap <b>Start New Shift</b> when the next shift begins.</>
+                    : <><ClipboardList className="h-4 w-4 shrink-0 text-amber-400" /> <b>{scopedProducts.filter((p: any) => countTouched[p.id]).length} of {scopedProducts.length}</b> items counted. Hand in your cash in <b>My Drawer</b> too, then close the shift.</>}
+                </div>
+              )}
+              {isOwner && (
+                <div className="rounded-2xl border border-slate-800 bg-slate-900 p-4 text-sm text-slate-300">
+                  View only. Last shift closed by <b className="text-slate-100">{closedShifts[0]?.closedBy || 'nobody yet'}</b>{closedShifts[0]?.closedAt ? <> on {fmtDateTime(closedShifts[0].closedAt)}</> : null}. Open <b>Staff Drawers</b> to see each person's cash count.
+                </div>
+              )}
+
+              {isOwner && (<>
               {/* The shift's money in short, plain words */}
               <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-3">
                 <h3 className="text-lg font-extrabold text-slate-100">{isEodLocked ? 'Money of the shift you closed' : 'Money of this shift so far'}</h3>
@@ -2170,15 +2208,17 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                 )}
               </div>
 
+              </>)}
+
               {/* Physical Audit Table */}
               <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
                 <div className="p-4 border-b border-slate-800 bg-slate-950/60 flex justify-between items-center">
                   <h3 className="font-bold text-slate-200 text-sm">Count Your Stock</h3>
-                  <span className="text-xs text-slate-400">Type what you counted on the shelf before you close the shift</span>
+                  <span className="text-xs text-slate-400">{isOwner ? 'Counts typed by staff' : 'Type what you counted on the shelf before you close the shift'}</span>
                 </div>
 
                 <div className="overflow-x-auto">
-                <table style={{ minWidth: 760 }} className="w-full text-left text-sm text-slate-300">
+                <table style={{ minWidth: isOwner ? 760 : 0 }} className="w-full text-left text-sm text-slate-300">
                   <thead className="bg-slate-950 text-slate-400 text-xs uppercase font-semibold">
                     <tr>
                       <th className="px-6 py-3.5">Product</th>
@@ -2204,18 +2244,21 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                               <p className="text-xs text-slate-500 font-mono">{p.sku}</p>
                             </div>
                           </td>
-                          <td className="px-6 py-4 font-mono">{p.startingStock}</td>
-                          <td className="px-6 py-4 font-mono font-bold text-amber-400">{p.stock}</td>
+                          {isOwner && <td className="px-6 py-4 font-mono">{p.startingStock}</td>}
+                          {isOwner && <td className="px-6 py-4 font-mono font-bold text-amber-400">{p.stock}</td>}
                           <td className="px-6 py-4">
                             <input
                               type="number"
-                              disabled={isEodLocked}
-                              value={actualCount}
+                              min="0"
+                              inputMode="numeric"
+                              placeholder="Count"
+                              disabled={isEodLocked || isOwner}
+                              value={isOwner || countTouched[p.id] ? actualCount : ''}
                               onChange={(e) => handlePhysicalCountChange(p.id, e.target.value)}
                               className="w-24 bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-100 font-mono focus:outline-none focus:border-amber-500 disabled:opacity-50"
                             />
                           </td>
-                          <td className="px-6 py-4 font-mono font-bold">
+                          {isOwner && <td className="px-6 py-4 font-mono font-bold">
                             {variance === 0 ? (
                               <span className="text-slate-500">0 (Correct)</span>
                             ) : variance < 0 ? (
@@ -2223,8 +2266,8 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                             ) : (
                               <span className="text-emerald-400">+{variance} (Extra)</span>
                             )}
-                          </td>
-                          <td className="px-6 py-4 text-right font-mono font-bold">
+                          </td>}
+                          {isOwner && <td className="px-6 py-4 text-right font-mono font-bold">
                             {costImpact < 0 ? (
                               <span className="text-rose-400">-{money(Math.abs(costImpact))}</span>
                             ) : costImpact > 0 ? (
@@ -2232,7 +2275,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                             ) : (
                               <span className="text-slate-500">{money(0)}</span>
                             )}
-                          </td>
+                          </td>}
                         </tr>
                       );
                     })}
@@ -2241,6 +2284,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                 </div>
               </div>
 
+              {isOwner && (<>
               {/* Closed shift history */}
               <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5">
                 <h3 className="font-bold text-slate-100 mb-1">Closed Shifts</h3>
@@ -2258,6 +2302,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                   </div>
                 )}
               </div>
+              </>)}
             </div>
           </div>
         )}
@@ -2289,7 +2334,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
         {/* VIEW: STAFF DRAWERS (staff: my drawer / owner: every staff member) */}
         {activeTab === 'drawer' && (
           <DrawersView
-            isOwner={isOwner} user={user} staffList={drawerStaff} openDrawers={openDrawers} drawers={drawers} sales={salesHistory}
+            isOwner={isOwner} user={user} staffList={drawerStaff} openDrawers={openDrawers} drawers={drawers} sales={salesHistory} refunds={refunds}
             myOpen={myOpenDrawer} figuresFor={figuresFor} canOpen
             stockBuys={liveStockBuys} stockLog={stockLog} onStockBuy={handleStockBuy} onVoid={handleVoidExpense}
             onOpen={handleOpenDrawer} onClose={handleCloseDrawer}
@@ -2297,8 +2342,13 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
           />
         )}
 
+        {/* VIEW: MY SALES + CALENDAR (staff: only what they sold) */}
+        {activeTab === 'mysales' && !isOwner && (
+          <MySalesView sales={salesHistory} user={user} refundsBySale={refundsBySale} money={money} fmtDateTime={fmtDateTime} currency={CURRENCY} />
+        )}
+
         {/* VIEW: CALENDAR OF EOD RESULTS (owner) */}
-        {activeTab === 'calendar' && (
+        {activeTab === 'calendar' && isOwner && (
           <CalendarView shifts={calendarShifts} money={money} fmtDateTime={fmtDateTime} currency={CURRENCY} showLosses={isOwner} />
         )}
 
