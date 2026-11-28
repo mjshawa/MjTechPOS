@@ -180,7 +180,8 @@ function RefundModal({ sale, lines, money, currency, onClose, onConfirm }: {
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
           <div>
             <label className="text-xs font-bold text-slate-400">Refund paid by</label>
-            <select value={method} onChange={e => setMethod(e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm mt-1">
+            <select value={method} onChange={e => setMethod(e.target.value)} disabled={sale.method === 'credit'} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm mt-1">
+              {sale.method === 'credit' && <option value="credit">Take off what the customer owes (no money paid out)</option>}
               <option value="cash">Cash (from till)</option><option value="mobile">Mobile money</option><option value="card">Card</option>
             </select>
           </div>

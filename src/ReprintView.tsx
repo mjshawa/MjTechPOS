@@ -17,7 +17,7 @@ type Props = {
 
 const SHOW_MAX = 60;
 const dayOf = (ts: number) => { const d = new Date(ts); const p = (n: number) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };
-const methodName = (m: string) => (m === 'mobile' ? 'Mobile money' : m === 'card' ? 'Card' : 'Cash');
+const methodName = (m: string) => (m === 'mobile' ? 'Mobile money' : m === 'card' ? 'Card' : m === 'credit' ? 'On credit' : 'Cash');
 
 export default function ReprintView({ sales, isOwner, user, money, fmtDateTime, onReprint }: Props) {
   const [q, setQ] = useState('');

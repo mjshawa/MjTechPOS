@@ -40,7 +40,8 @@ import {
   Wallet,
   RotateCcw,
   Store,
-  MessageCircle
+  MessageCircle,
+  HandCoins
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -68,6 +69,8 @@ import CalendarView from './CalendarView';
 import StockHistoryModal from './StockHistoryModal';
 import ShiftRecordModal from './ShiftRecordModal';
 import MySalesView from './MySalesView';
+import CreditsView from './CreditsView';
+import { buildLedger, balanceOf, checkGive, creditGiven, DEFAULT_POLICY, CreditCustomer } from './credits';
 import MoneySimple, { ShiftMoneyCard } from './MoneySimple';
 import ReprintView from './ReprintView';
 import ExpensesView, { PAID_FROM } from './ExpensesView';
@@ -279,8 +282,6 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
   // Cash drawer: opening float is entered at shift start, counted cash at the end. Both are saved on the device.
   const [cashFloat, setCashFloat] = usePersistentState(`${workspace}:cashFloat`, '');
   const [cashCounted, setCashCounted] = usePersistentState(`${workspace}:cashCounted`, '');
-  // Staff count the shelf BLIND (the screen never shows what the system expects). This remembers which items already have a typed count.
-  const [countTouched, setCountTouched] = usePersistentState(`${workspace}:countTouched`, {});
   const [profitPeriod, setProfitPeriod] = useState('7d');
 
   // New Item State for Inventory
@@ -321,6 +322,27 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
     refunds.forEach((r: any) => m.set(r.saleId, (m.get(r.saleId) || 0) + r.amount));
     return m;
   }, [refunds]);
+
+  // ---------- CUSTOMER CREDIT ----------
+  // Credit customers + the owner's credit rules (synced through the settings table), and the money received later (append-only, synced).
+  const [creditCustomers, setCreditCustomers] = usePersistentState(`${workspace}:creditCustomers`, []);
+  const [creditPolicy, setCreditPolicy] = usePersistentState(`${workspace}:creditPolicy`, DEFAULT_POLICY);
+  const [creditPayments, setCreditPayments] = usePersistentCollection(`${workspace}:creditPayments`, [], { newestFirst: true });
+  // A cancelled payment is a 'void' row pointing at the original; both are dropped here so nothing downstream has to think about it.
+  const liveCreditPayments = useMemo(() => {
+    const gone = new Set<string>(creditPayments.filter((x: any) => x.kind === 'void').map((x: any) => x.voidOf));
+    return creditPayments.filter((x: any) => x.kind === 'creditpay' && !gone.has(x.id));
+  }, [creditPayments]);
+  const creditLedger = useMemo(() => buildLedger(salesHistory, refunds, liveCreditPayments), [salesHistory, refunds, liveCreditPayments]);
+  const [creditCustId, setCreditCustId] = useState('');
+  const [creditDue, setCreditDue] = useState('');
+  const [creditNote, setCreditNote] = useState('');
+  // Money received from credit customers in THIS shift (cash joins the drawer, mobile/card are kept apart)
+  const shiftCollected = useMemo(() => {
+    const t: any = { cash: 0, mobile: 0, card: 0, total: 0, count: 0 };
+    liveCreditPayments.filter((x: any) => x.shiftKey === shiftKey).forEach((x: any) => { t[x.method] = (t[x.method] || 0) + x.amount; t.total += x.amount; t.count += 1; });
+    return t;
+  }, [liveCreditPayments, shiftKey]);
 
   const [nowTs, setNowTs] = useState(Date.now());
   useEffect(() => {
@@ -381,7 +403,8 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
   const [businessRaw, setBusiness] = usePersistentState('business', EMPTY_BUSINESS);
   const sync = useSupabaseSync({
     outbox, setOutbox, products, setProducts, tabs: openTabs, setTabs: setOpenTabs, business: businessRaw, setBusiness,
-    collections: { sales: setSalesHistory, closed_shifts: setClosedShifts, stock_log: setStockLog, expenses: setExpenses, refunds: setRefunds, drawers: setDrawers },
+    credit: { customers: creditCustomers, setCustomers: setCreditCustomers, policy: creditPolicy, setPolicy: setCreditPolicy },
+    collections: { sales: setSalesHistory, closed_shifts: setClosedShifts, stock_log: setStockLog, expenses: setExpenses, refunds: setRefunds, drawers: setDrawers, credit_payments: setCreditPayments },
     storeId, workspace,
   });
   const [showSync, setShowSync] = useState(false);
@@ -417,7 +440,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
   const shiftExpenseTotals = expensesByShift.get(shiftKey) || { total: 0, till: 0, mobile: 0, owner: 0 };
   const shiftCashSales = useMemo(() => shiftSales.filter((x: any) => x.method === 'cash').reduce((a: number, x: any) => a + x.total, 0) - shiftRefundTotals.cash, [shiftSales, shiftRefundTotals]);
   const cashFloatNum = parseFloat(cashFloat) || 0;
-  const cashExpected = cashFloatNum + shiftCashSales - shiftExpenseTotals.till;
+  const cashExpected = cashFloatNum + shiftCashSales + shiftCollected.cash - shiftExpenseTotals.till;
   const cashCountedNum = cashCounted === '' || isNaN(parseFloat(cashCounted)) ? null : parseFloat(cashCounted);
   const cashVariance = cashCountedNum === null ? null : cashCountedNum - cashExpected;
   const expensesFor = (sh: any) => expensesByShift.get(`${sh.deviceId || deviceId}:${sh.openedAt}`) || { total: 0, till: 0, mobile: 0, owner: 0 };
@@ -488,7 +511,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
   const myOpenDrawer: OpenDrawer | null = !isOwner ? (openDrawers[user.id] || null) : null;
   const needsDrawer = !isOwner && !myOpenDrawer;
   const figuresFor = (d: OpenDrawer, to = Date.now()) =>
-    drawerFigures({ staffId: d.staffId, staffName: d.staffName, from: d.openedAt, to, deviceId: d.deviceId, sales: salesHistory, refunds, liveExpenses: [...liveExpenses, ...liveStockBuys] });
+    drawerFigures({ staffId: d.staffId, staffName: d.staffName, from: d.openedAt, to, deviceId: d.deviceId, sales: salesHistory, refunds, liveExpenses: [...liveExpenses, ...liveStockBuys], payments: liveCreditPayments });
   const handleOpenDrawer = (float: number) => {
     if (isOwner) return;
     setOpenDrawers((prev: any) => ({ ...prev, [user.id]: { staffId: user.id, staffName: user.name, openedAt: Date.now(), float: round2(float), deviceId } }));
@@ -506,6 +529,43 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
     setOutbox((prev: any[]) => [...prev, { id: rec.id, table: 'drawers', payload: { ...rec, storeId }, failed: false }]);
     setOpenDrawers((prev: any) => { const n = { ...prev }; delete n[d.staffId]; return n; });
   };
+  // ---------- CREDIT: customers, receiving payments ----------
+  const handleSaveCreditCustomer = (c: CreditCustomer) => {
+    if (!isOwner && !(creditPolicy as any).staffMayAdd && !creditCustomers.some((x: any) => x.id === c.id)) return; // staff may add only when the owner allows it
+    if (!isOwner && creditCustomers.some((x: any) => x.id === c.id)) return;                                           // only the owner edits limits / blocks
+    setCreditCustomers((prev: any[]) => (prev.some(x => x.id === c.id) ? prev.map(x => (x.id === c.id ? c : x)) : [...prev, c]));
+  };
+  const handleSaveCreditPolicy = (pol: any) => { if (isOwner) setCreditPolicy(pol); };
+  const handleReceiveCredit = ({ customer, amount, method, note }: { customer: CreditCustomer; amount: number; method: string; note: string }): string => {
+    const bal = balanceOf(creditLedger, customer.id);
+    if (!(amount > 0) || amount > bal + 0.005) return `${customer.name} owes ${money(bal)}.`;
+    if (!isOwner && method === 'cash' && !myOpenDrawer) return 'Open your drawer first (My Drawer). Cash you receive is counted in your drawer.';
+    const entry = {
+      id: newId(), kind: 'creditpay', ts: Date.now(), shiftKey, customerId: customer.id, customerName: customer.name,
+      amount: round2(amount), method, note, by: user.name, byId: user.id, deviceId, deviceName,
+    };
+    setCreditPayments((prev: any[]) => [entry, ...prev]);
+    setOutbox((prev: any[]) => [...prev, { id: entry.id, table: 'credit_payments', payload: { ...entry, storeId }, failed: false }]);
+    return '';
+  };
+  const handleVoidCreditPayment = (pm: any) => {
+    if (!isOwner) return;
+    const entry = { id: newId(), kind: 'void', voidOf: pm.id, ts: Date.now(), shiftKey, customerId: pm.customerId, customerName: pm.customerName, amount: pm.amount, method: pm.method, by: user.name, byId: user.id, deviceId };
+    setCreditPayments((prev: any[]) => [entry, ...prev]);
+    setOutbox((prev: any[]) => [...prev, { id: entry.id, table: 'credit_payments', payload: { ...entry, storeId }, failed: false }]);
+  };
+  // credit given in this shift: all staff for the owner, only my own for staff
+  const shiftCreditGiven = useMemo(
+    () => creditGiven(shiftSales, (s: any) => isOwner || !s.cashierId || s.cashierId === user.id),
+    [shiftSales, isOwner, user.id]
+  );
+  const myShiftCollected = useMemo(() => {
+    if (isOwner) return shiftCollected;
+    const t: any = { cash: 0, mobile: 0, card: 0, total: 0, count: 0 };
+    liveCreditPayments.filter((x: any) => x.shiftKey === shiftKey && x.byId === user.id).forEach((x: any) => { t[x.method] = (t[x.method] || 0) + x.amount; t.total += x.amount; t.count += 1; });
+    return t;
+  }, [liveCreditPayments, shiftKey, isOwner, user.id, shiftCollected]);
+
   const drawerStaff = useMemo(() => (auth?.staff || []).map((x: any) => ({ id: x.id, name: x.name || x.email, role: x.role })), [auth?.staff]);
   const shiftDrawers = useMemo(() => drawers.filter((d: any) => d.closedAt >= shiftStart && (!d.deviceId || d.deviceId === deviceId)), [drawers, shiftStart, deviceId]);
 
@@ -642,7 +702,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
   };
 
   // Staff can only use Terminal + Tabs
-  useEffect(() => { if (!isOwner && !['pos', 'tabs', 'sales', 'reprint', 'inventory', 'expenses', 'drawer', 'mysales', 'eod'].includes(activeTab)) setActiveTab('pos'); }, [isOwner, activeTab]);
+  useEffect(() => { if (!isOwner && !['pos', 'tabs', 'sales', 'reprint', 'inventory', 'expenses', 'drawer', 'credits', 'mysales', 'eod'].includes(activeTab)) setActiveTab('pos'); }, [isOwner, activeTab]);
 
   // Calendar feed: every closed shift + the shift still open
   const openShiftSummary = useMemo(() => {
@@ -904,6 +964,19 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
     const tendered = paymentMethod === 'cash' && amountReceived.trim() !== '' ? Number(amountReceived) : null;
     if (tendered !== null && (!isFinite(tendered) || tendered + 0.005 < grandTotal)) return;
 
+    // Credit: the customer must be on the approved list and inside their limit. Staff are stopped; the owner may override.
+    let creditInfo: any = null;
+    if (paymentMethod === 'credit') {
+      const cust: any = creditCustomers.find((c: any) => c.id === creditCustId);
+      const chk = checkGive(cust, balanceOf(creditLedger, creditCustId), grandTotal);
+      if (!cust) { alert('Choose the customer who is taking credit.'); return; }
+      if (!chk.ok) {
+        if (!isOwner) { alert(chk.reason); return; }
+        if (!window.confirm(`${chk.reason}\n\nSell on credit anyway (as the owner)?`)) return;
+      }
+      creditInfo = { customerId: cust.id, customerName: cust.name, phone: cust.phone || '', dueDate: creditDue || null, note: creditNote.trim(), limitAtSale: cust.limit ?? null };
+    }
+
     // Take the order out of stock (bottles a saved tab already took out are not taken again)
     applyCartToStock(cart);
 
@@ -930,7 +1003,8 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
       total: grandTotal,
       barSales: catTotal('Bar'),
       retailSales: catTotal('Retail'),
-      customer: customerName || 'Walk-In Guest',
+      customer: creditInfo ? creditInfo.customerName : (customerName || 'Walk-In Guest'),
+      ...(creditInfo ? { credit: creditInfo } : {}),
       cashier: user.name,
       cashierId: user.id,
       deviceId,
@@ -951,6 +1025,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
     setDiscount(0);
     setCustomerName('');
     setAmountReceived('');
+    if (creditInfo) { setCreditCustId(''); setCreditDue(''); setCreditNote(''); setPaymentMethod('cash'); } // never leave Credit selected for the next sale by accident
     setIsCheckoutOpen(false);
   };
 
@@ -961,7 +1036,6 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
       ...prev,
       [productId]: isNaN(parsed) ? 0 : parsed
     }));
-    setCountTouched((prev: any) => ({ ...prev, [productId]: val !== '' && !isNaN(parsed) }));
   };
 
   // Inventory: delete = hide (owner only). It can be restored; history is kept.
@@ -1104,9 +1178,14 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
 
     const grossSold = sales.reduce((a: number, x: any) => a + (x.total || 0), 0);
     const refundTotal = refs.reduce((a: number, x: any) => a + (x.amount || 0), 0);
-    const byMethod: Record<string, number> = { cash: 0, mobile: 0, card: 0 };
+    const byMethod: Record<string, number> = { cash: 0, mobile: 0, card: 0, credit: 0 };
     sales.forEach((x: any) => { byMethod[methodOf(x)] = (byMethod[methodOf(x)] || 0) + (x.total || 0); });
     refs.forEach((x: any) => { byMethod[x.method] = (byMethod[x.method] || 0) - (x.amount || 0); });
+    // money received from credit customers in this shift (cash joins the drawer)
+    const pays = liveCreditPayments.filter((x: any) => x.shiftKey === key).sort((a: any, b: any) => a.ts - b.ts);
+    const collected: any = { cash: 0, mobile: 0, card: 0, total: 0, count: pays.length };
+    pays.forEach((x: any) => { collected[x.method] = (collected[x.method] || 0) + (x.amount || 0); collected.total += x.amount || 0; });
+    const creditSalesN = sales.filter((x: any) => methodOf(x) === 'credit');
 
     // cost of goods: what was sold, minus the cost of refunded items that went back on the shelf
     let cogs = 0;
@@ -1125,8 +1204,9 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
     const staffMap = new Map<string, any>();
     sales.forEach((x: any) => {
       const k = x.cashierId || x.cashier || '?';
-      const r = staffMap.get(k) || { name: x.cashier || 'Unknown', count: 0, total: 0, cash: 0, mobile: 0, card: 0 };
+      const r = staffMap.get(k) || { name: x.cashier || 'Unknown', count: 0, total: 0, cash: 0, mobile: 0, card: 0, credit: 0, creditCount: 0 };
       r.count += 1; r.total += x.total || 0; r[methodOf(x)] = (r[methodOf(x)] || 0) + (x.total || 0);
+      if (methodOf(x) === 'credit') r.creditCount += 1;
       staffMap.set(k, r);
     });
     const expenseTotal = exps.reduce((a: number, x: any) => a + (x.amount || 0), 0);
@@ -1135,7 +1215,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
     const cashSales = (byMethod.cash || 0);
     const closed = sh.closedAt != null;
     const float = closed ? (sh.cashFloat || 0) : cashFloatNum;
-    const expected = closed ? (sh.cashExpected ?? float + cashSales - tillOut) : cashExpected;
+    const expected = closed ? (sh.cashExpected ?? float + cashSales + collected.cash - tillOut) : cashExpected;
     const counted = closed ? (sh.cashCounted ?? null) : cashCountedNum;
     const writeOffs = stockLog.filter((l: any) => l.type === 'adjust_out' && l.loss && l.ts >= from && l.ts <= to); // spilled, expired, staff use... recorded by the owner
     const shrinkValue = r2n((closed ? (sh.shrinkageValue || 0) : eodMetrics.totalShrinkageValue) + writeOffs.reduce((a: number, l: any) => a + (l.qty || 0) * (l.cost || 0), 0));
@@ -1143,14 +1223,15 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
     const netSales = grossSold - refundTotal;
     const grossProfit = netSales - cogs;
     const drawerRows = drawers.filter((d: any) => d.openedAt >= from && d.openedAt <= to && (!d.deviceId || d.deviceId === dev))
-      .map((d: any) => ({ staffName: d.staffName, float: d.float || 0, salesCount: d.salesCount || 0, cashSales: d.cashSales || 0, expected: d.expected || 0, counted: d.counted || 0, variance: d.variance || 0 }));
+      .map((d: any) => ({ staffName: d.staffName, float: d.float || 0, salesCount: d.salesCount || 0, cashSales: d.cashSales || 0, mobileSales: d.mobileSales, creditCount: d.creditCount, creditTotal: d.creditTotal, collectedCash: d.collectedCash || 0, expected: d.expected || 0, counted: d.counted || 0, variance: d.variance || 0 }));
     return {
       openedAt: from, closedAt: closed ? sh.closedAt : null, closedBy: sh.closedBy || null, deviceName: sh.deviceName || null,
       salesCount: sales.length, grossSold: r2n(grossSold), refundTotal: r2n(refundTotal), refundCount: refs.length, netSales: r2n(netSales),
-      byMethod: { cash: r2n(byMethod.cash || 0), mobile: r2n(byMethod.mobile || 0), card: r2n(byMethod.card || 0) },
+      byMethod: { cash: r2n(byMethod.cash || 0), mobile: r2n(byMethod.mobile || 0), card: r2n(byMethod.card || 0), credit: r2n(byMethod.credit || 0) },
+      credit: { count: creditSalesN.length, total: r2n(creditSalesN.reduce((a: number, x: any) => a + (x.total || 0), 0)), collected: { cash: r2n(collected.cash), mobile: r2n(collected.mobile), card: r2n(collected.card), total: r2n(collected.total), count: collected.count }, payments: pays },
       cogs: r2n(cogs), grossProfit: r2n(grossProfit), expenseTotal: r2n(expenseTotal), shrinkValue, shrinkUnits,
       netProfit: r2n(grossProfit - expenseTotal - shrinkValue),
-      cash: { float, sales: r2n(cashSales), tillOut: r2n(tillOut), expected, counted, variance: counted == null ? null : r2n(counted - expected) },
+      cash: { float, sales: r2n(cashSales), collected: r2n(collected.cash), tillOut: r2n(tillOut), expected, counted, variance: counted == null ? null : r2n(counted - expected) },
       expenses: exps.map((x: any) => ({ ...x, paidFromLabel: PAID_FROM.find((f: any) => f.id === x.paidFrom)?.label || x.paidFrom || '' })),
       stockBuys: buys,
       items: [...itemMap.values()].sort((a, b) => b.revenue - a.revenue),
@@ -1167,33 +1248,32 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
     const m = new Map<string, any>();
     closedShifts.forEach((c: any) => { const r = shiftReport(c); m.set(c.id, { cogs: r.cogs, net: r.netProfit, expenses: r.expenseTotal, gross: r.grossProfit, report: r }); });
     return m;
-  }, [closedShifts, salesHistory, refunds, liveExpenses, liveStockBuys, products, stockLog]);
+  }, [closedShifts, salesHistory, refunds, liveExpenses, liveStockBuys, products, stockLog, liveCreditPayments]);
 
   // End of Day: close the shift, record the totals, lock the register
   const handleCloseShift = () => {
     if (isOwner) return; // counting and closing is done from the staff login; the owner only reviews
     if (myOpenDrawer) { alert('Hand in your cash drawer first (My Drawer), then close the shift.'); return; }
-    const notCounted = scopedProducts.filter((p: any) => !countTouched[p.id]);
-    if (notCounted.length) {
-      alert(`Count every item before closing the shift.\n\nStill to count (${notCounted.length}): ${notCounted.slice(0, 6).map((p: any) => p.name).join(', ')}${notCounted.length > 6 ? '…' : ''}\n\nIf an item is finished, type 0.`);
-      return;
-    }
+    // Stock is counted AUTOMATICALLY from the system on close (opening stock - units sold + restocks). Nothing has to be typed.
+    // If a staff member typed a different number for an item in Count & Close Shift, that number is used for that item.
     const warn = openTabs.length > 0 ? `\n\n${openTabs.length} tab(s) are still open and will stay open for the next shift.` : '';
     const noCount = ''; // each staff member's cash is counted in My Drawer
     const stillOpen = Object.values(openDrawers).map((d: any) => d.staffName);
     const drw = stillOpen.length ? `\n\nStaff drawers still open: ${stillOpen.join(', ')}. Ask them to count and hand in their cash.` : '';
     const exp = `\n\nExpenses saved this shift: ${money(shiftExpenseTotals.total)} (${shiftExpenseList.length} entr${shiftExpenseList.length === 1 ? 'y' : 'ies'}).\nDid you add ALL of tonight's expenses?${noCount}${drw}`;
     if (!window.confirm(`Close the shift now? Sales will be added up and the till will be locked.${exp}${warn}`)) return;
-    const byMethod: Record<string, number> = { cash: 0, mobile: 0, card: 0 };
+    const byMethod: Record<string, number> = { cash: 0, mobile: 0, card: 0, credit: 0 };
     shiftSales.forEach((s: any) => { byMethod[s.method] = (byMethod[s.method] || 0) + s.total; });
-    ['cash', 'mobile', 'card'].forEach(k => { byMethod[k] -= shiftRefundTotals[k] || 0; });
+    ['cash', 'mobile', 'card', 'credit'].forEach(k => { byMethod[k] -= shiftRefundTotals[k] || 0; });
     const shift = {
       id: newId(),
       openedAt: shiftStart,
       closedAt: Date.now(),
       total: totalSalesVolume,
       count: shiftSales.length,
-      cash: byMethod.cash, mobile: byMethod.mobile, card: byMethod.card,
+      cash: byMethod.cash, mobile: byMethod.mobile, card: byMethod.card, credit: byMethod.credit,
+      creditCount: shiftSales.filter((s: any) => s.method === 'credit').length,
+      collectedCash: shiftCollected.cash, collectedMobile: shiftCollected.mobile, collectedCard: shiftCollected.card, // debts paid by credit customers during this shift
       barSales: shiftSales.reduce((a: number, s: any) => a + (s.barSales || 0), 0) - shiftRefundTotals.bar,
       retailSales: shiftSales.reduce((a: number, s: any) => a + (s.retailSales || 0), 0) - shiftRefundTotals.retail,
       refundTotal: shiftRefundTotals.total, refundCount: shiftRefundTotals.count,
@@ -1226,7 +1306,6 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
     setShiftStart(Date.now());
     setCashFloat('');
     setCashCounted('');
-    setCountTouched({});
     setIsEodLocked(false);
   };
 
@@ -1308,6 +1387,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
               { id: 'inventory', label: 'Stock Tracking', icon: Package, owner: false },
               { id: 'expenses', label: 'Expenses', icon: Wallet, owner: false },
               { id: 'drawer', label: isOwner ? 'Staff Drawers' : 'My Drawer', icon: Banknote, owner: false },
+              { id: 'credits', label: 'Credits', icon: HandCoins, owner: false },
               { id: 'eod', label: isOwner ? 'End of Day (EOD)' : 'Count & Close Shift', icon: ClipboardList, owner: false },
               { id: 'mysales', label: 'My Sales & Calendar', icon: CalendarDays, owner: false, staffOnly: true },
               { id: 'calendar', label: 'Calendar', icon: CalendarDays, owner: true },
@@ -2084,7 +2164,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                 <div className={`rounded-2xl border p-4 text-sm flex items-center gap-2 ${isEodLocked ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300' : 'bg-slate-900 border-slate-800 text-slate-300'}`}>
                   {isEodLocked
                     ? <><CheckCircle className="h-4 w-4 shrink-0" /> The shift is closed and your count is saved. Tap <b>Start New Shift</b> when the next shift begins.</>
-                    : <><ClipboardList className="h-4 w-4 shrink-0 text-amber-400" /> <b>{scopedProducts.filter((p: any) => countTouched[p.id]).length} of {scopedProducts.length}</b> items counted. Hand in your cash in <b>My Drawer</b> too, then close the shift.</>}
+                    : <><ClipboardList className="h-4 w-4 shrink-0 text-amber-400" /> Stock is <b>counted automatically</b> ({scopedProducts.length} items). Hand in your cash in <b>My Drawer</b>, then tap <b>Close Shift</b>.</>}
                 </div>
               )}
               {isOwner && (
@@ -2214,7 +2294,7 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
               <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
                 <div className="p-4 border-b border-slate-800 bg-slate-950/60 flex justify-between items-center">
                   <h3 className="font-bold text-slate-200 text-sm">Count Your Stock</h3>
-                  <span className="text-xs text-slate-400">{isOwner ? 'Counts typed by staff' : 'Type what you counted on the shelf before you close the shift'}</span>
+                  <span className="text-xs text-slate-400">{isOwner ? 'Counted automatically from stock when staff close the shift' : 'Counted automatically from stock. Only change a number if the shelf is different.'}</span>
                 </div>
 
                 <div className="overflow-x-auto">
@@ -2222,11 +2302,11 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                   <thead className="bg-slate-950 text-slate-400 text-xs uppercase font-semibold">
                     <tr>
                       <th className="px-6 py-3.5">Product</th>
-                      <th className="px-6 py-3.5">Stock at Start</th>
-                      <th className="px-6 py-3.5">Should Be Left</th>
-                      <th className="px-6 py-3.5">You Counted</th>
-                      <th className="px-6 py-3.5">Difference</th>
-                      <th className="px-6 py-3.5 text-right">Money Lost or Gained</th>
+                      {isOwner && <th className="px-6 py-3.5">Stock at Start</th>}
+                      {isOwner && <th className="px-6 py-3.5">Should Be Left</th>}
+                      <th className="px-6 py-3.5">{isOwner ? 'Counted' : 'Stock Counted'}</th>
+                      {isOwner && <th className="px-6 py-3.5">Difference</th>}
+                      {isOwner && <th className="px-6 py-3.5 text-right">Money Lost or Gained</th>}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800">
@@ -2251,9 +2331,8 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
                               type="number"
                               min="0"
                               inputMode="numeric"
-                              placeholder="Count"
                               disabled={isEodLocked || isOwner}
-                              value={isOwner || countTouched[p.id] ? actualCount : ''}
+                              value={actualCount}
                               onChange={(e) => handlePhysicalCountChange(p.id, e.target.value)}
                               className="w-24 bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-100 font-mono focus:outline-none focus:border-amber-500 disabled:opacity-50"
                             />
@@ -2334,11 +2413,21 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
         {/* VIEW: STAFF DRAWERS (staff: my drawer / owner: every staff member) */}
         {activeTab === 'drawer' && (
           <DrawersView
-            isOwner={isOwner} user={user} staffList={drawerStaff} openDrawers={openDrawers} drawers={drawers} sales={salesHistory} refunds={refunds}
+            isOwner={isOwner} user={user} staffList={drawerStaff} openDrawers={openDrawers} drawers={drawers} sales={salesHistory} refunds={refunds} creditPayments={liveCreditPayments} creditOwed={[...creditLedger.values()].reduce((a: number, l: any) => a + l.balance, 0)}
             myOpen={myOpenDrawer} figuresFor={figuresFor} canOpen
             stockBuys={liveStockBuys} stockLog={stockLog} onStockBuy={handleStockBuy} onVoid={handleVoidExpense}
             onOpen={handleOpenDrawer} onClose={handleCloseDrawer}
             money={money} fmtDateTime={fmtDateTime} currency={CURRENCY}
+          />
+        )}
+
+        {/* VIEW: CREDITS (customers who pay later) */}
+        {activeTab === 'credits' && (
+          <CreditsView
+            isOwner={isOwner} user={user} customers={creditCustomers} policy={creditPolicy as any} ledger={creditLedger} payments={liveCreditPayments}
+            given={shiftCreditGiven} collected={myShiftCollected} canTakeCash={isOwner || !!myOpenDrawer}
+            onSaveCustomer={handleSaveCreditCustomer} onSavePolicy={handleSaveCreditPolicy} onReceive={handleReceiveCredit} onVoid={handleVoidCreditPayment}
+            money={money} fmtDateTime={fmtDateTime} currency={CURRENCY} newId={newId}
           />
         )}
 
@@ -2823,11 +2912,12 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
 
             <div className="space-y-2">
               <label className="text-xs text-slate-400 font-bold">How is the customer paying?</label>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-4 gap-2">
                 {[
                   { id: 'cash', label: 'Cash', icon: Banknote },
                   { id: 'mobile', label: 'Mobile Money', icon: QrCode },
-                  { id: 'card', label: 'Card', icon: CreditCard }
+                  { id: 'card', label: 'Card', icon: CreditCard },
+                  { id: 'credit', label: 'Credit', icon: HandCoins }
                 ].map(pm => {
                   const Icon = pm.icon;
                   return (
@@ -2881,9 +2971,39 @@ export default function App({ user, auth, workspace, theme, onToggleTheme }: any
               );
             })()}
 
+            {paymentMethod === 'credit' && (() => {
+              const list = creditCustomers.filter((c: any) => !c.blocked || c.id === creditCustId);
+              const cust: any = creditCustomers.find((c: any) => c.id === creditCustId);
+              const bal = cust ? balanceOf(creditLedger, cust.id) : 0;
+              const chk = checkGive(cust, bal, grandTotal);
+              return (
+                <div className="space-y-2 bg-slate-950/60 border border-slate-800 rounded-xl p-3">
+                  <label className="text-xs text-slate-400 font-bold">Who is taking credit?</label>
+                  <select value={creditCustId} onChange={e => setCreditCustId(e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-amber-500">
+                    <option value="">Choose a customer…</option>
+                    {list.map((c: any) => <option key={c.id} value={c.id}>{c.name}{c.phone ? ` · ${c.phone}` : ''}{c.blocked ? ' (blocked)' : ''}</option>)}
+                  </select>
+                  {creditCustomers.length === 0 && <p className="text-[11px] text-amber-400">No credit customers yet. {isOwner || (creditPolicy as any).staffMayAdd ? 'Add one in the Credits tab first.' : 'Ask the owner to add the customer in the Credits tab.'}</p>}
+                  {cust && (
+                    <div className={`text-xs rounded-lg px-3 py-2 border ${chk.ok ? 'bg-slate-900 border-slate-800 text-slate-300' : 'bg-rose-500/10 border-rose-500/30 text-rose-300'}`}>
+                      Owes <b className="font-mono">{money(bal)}</b> · limit <b className="font-mono">{cust.limit === null ? 'none' : money(cust.limit)}</b>
+                      {chk.ok ? <> · after this sale <b className="font-mono">{money(bal + grandTotal)}</b></> : <><br /><b>{chk.reason}</b>{isOwner ? ' You can still sell as the owner.' : ''}</>}
+                    </div>
+                  )}
+                  <div className="grid grid-cols-2 gap-2">
+                    <div><label className="text-[11px] text-slate-400 font-bold">Pay by (optional)</label>
+                      <input type="date" value={creditDue} onChange={e => setCreditDue(e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-amber-500" /></div>
+                    <div><label className="text-[11px] text-slate-400 font-bold">Note (optional)</label>
+                      <input type="text" value={creditNote} onChange={e => setCreditNote(e.target.value)} placeholder="e.g. pays on Friday" className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-amber-500" /></div>
+                  </div>
+                  <p className="text-[11px] text-slate-500">No money is received now. This sale goes on the customer's account and does not add to your cash drawer.</p>
+                </div>
+              );
+            })()}
+
             <button
               onClick={handleCompleteOrder}
-              disabled={paymentMethod === 'cash' && amountReceived.trim() !== '' && (!isFinite(Number(amountReceived)) || Number(amountReceived) + 0.005 < grandTotal)}
+              disabled={(paymentMethod === 'cash' && amountReceived.trim() !== '' && (!isFinite(Number(amountReceived)) || Number(amountReceived) + 0.005 < grandTotal)) || (paymentMethod === 'credit' && !creditCustId)}
               className="w-full py-4 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 font-extrabold text-base rounded-2xl shadow-lg shadow-emerald-500/20 transition-all flex items-center justify-center gap-2"
             >
               <CheckCircle className="h-5 w-5" /> Finish Sale

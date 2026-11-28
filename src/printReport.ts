@@ -159,7 +159,7 @@ export function buildReceiptHtml(r: any) {
     ${r.discountAmount ? line('Discount', '-' + m(r.discountAmount)) : ''}
     ${r.tax ? line('VAT (' + r.taxPct + '%)', m(r.tax)) : ''}
     ${line('TOTAL', m(r.grandTotal), true)}
-    ${line('Paid by', String(r.paymentMethod || ''))}
+    ${r.paymentMethod === 'credit' ? line('Paid by', 'ON CREDIT') + (r.credit?.customerName ? line('Account', String(r.credit.customerName)) : '') + (r.credit?.dueDate ? line('Pay by', String(r.credit.dueDate)) : '') : line('Paid by', String(r.paymentMethod || ''))}
     ${r.tendered != null ? line('Cash received', m(r.tendered)) + line('Change', m(r.change || 0), true) : ''}
   </table><hr>
   ${b.payNote ? `<p class="c s">${esc(b.payNote)}</p><hr>` : ''}
@@ -201,7 +201,7 @@ export function buildReceiptText(r: any) {
   L.push(`Subtotal: ${m(r.subtotal)}`);
   if (r.discountAmount) L.push(`Discount: -${m(r.discountAmount)}`);
   if (r.tax) L.push(`Tax (${r.taxPct ?? 0}%): ${m(r.tax)}`);
-  L.push(`*Total paid (${r.paymentMethod}): ${m(r.grandTotal)}*`);
+  L.push(r.paymentMethod === 'credit' ? `*Total on credit${r.credit?.customerName ? ` (${r.credit.customerName})` : ''}: ${m(r.grandTotal)}*${r.credit?.dueDate ? `\nPlease pay by ${r.credit.dueDate}` : ''}` : `*Total paid (${r.paymentMethod}): ${m(r.grandTotal)}*`);
   if (r.tendered != null) { L.push(`Cash received: ${m(r.tendered)}`); L.push(`Change: ${m(r.change)}`); }
   if (r.footer) { L.push(''); L.push(r.footer); }
   return L.join('\n');

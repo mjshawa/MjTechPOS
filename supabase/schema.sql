@@ -220,3 +220,18 @@ end $$;
 drop trigger if exists products_keep_stock on public.products;
 create trigger products_keep_stock before update on public.products
 for each row execute function public.keep_server_stock();
+
+-- ===== 8: customer credit payments (money received later from credit customers) =====
+create table if not exists public.credit_payments (
+  id          text primary key,
+  store_id    text not null,
+  payload     jsonb not null,            -- { kind: 'creditpay' | 'void', customerId, customerName, amount, method, note, by, byId, deviceId, shiftKey, voidOf, ts }
+  created_at  timestamptz not null,
+  received_at timestamptz not null default now()
+);
+create index if not exists credit_payments_store_time on public.credit_payments (store_id, created_at desc);
+alter table public.credit_payments enable row level security;
+drop policy if exists "staff read credit_payments"   on public.credit_payments;
+drop policy if exists "staff insert credit_payments" on public.credit_payments;
+create policy "staff read credit_payments"   on public.credit_payments for select to authenticated using (true);
+create policy "staff insert credit_payments" on public.credit_payments for insert to authenticated with check (true);

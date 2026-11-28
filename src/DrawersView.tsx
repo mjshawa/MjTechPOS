@@ -31,11 +31,11 @@ export function VerdictBadge({ verdict, variance, money, compact }: { verdict: V
 }
 
 export default function DrawersView({
-  isOwner, user, staffList, openDrawers, drawers, sales, refunds = [], myOpen, figuresFor, canOpen,
+  isOwner, user, staffList, openDrawers, drawers, sales, refunds = [], creditPayments = [], creditOwed = 0, myOpen, figuresFor, canOpen,
   stockBuys, stockLog, onStockBuy, onVoid, onOpen, onClose, money, fmtDateTime, currency,
 }: {
   isOwner: boolean; user: { id: string; name: string }; staffList: { id: string; name: string; role?: string }[];
-  openDrawers: Record<string, OpenDrawer>; drawers: any[]; sales: any[]; refunds?: any[]; myOpen: OpenDrawer | null;
+  openDrawers: Record<string, OpenDrawer>; drawers: any[]; sales: any[]; refunds?: any[]; creditPayments?: any[]; creditOwed?: number; myOpen: OpenDrawer | null;
   figuresFor: (d: OpenDrawer) => Figures; canOpen: boolean;
   stockBuys: any[]; stockLog: any[]; onStockBuy: (f: { amount: number; supplier: string; note: string }) => void; onVoid: (e: any) => void;
   onOpen: (float: number) => void; onClose: (counted: number, d: OpenDrawer) => void;
@@ -116,7 +116,8 @@ export default function DrawersView({
                 <h3 className="font-bold text-slate-100 flex items-center gap-2"><Lock className="h-4 w-4 text-amber-400" /> Close my drawer</h3>
                 <span className="text-[11px] font-bold px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">Open since {fmtDateTime(myOpen.openedAt)}</span>
               </div>
-              <p className="text-sm text-slate-400">{f?.salesCount || 0} sale{f?.salesCount === 1 ? '' : 's'} on your drawer so far. Count only the CASH (not mobile money or card), then type the total.</p>
+              <p className="text-sm text-slate-400">{f?.salesCount || 0} sale{f?.salesCount === 1 ? '' : 's'} on your drawer so far. Count only the CASH (not mobile money or card), then type the total. Cash you collected from credit customers is part of your drawer.</p>
+              {(f?.creditCount || 0) > 0 && <p className="text-xs text-slate-500">Credit you gave on this drawer: {f?.creditCount} sale{f?.creditCount === 1 ? '' : 's'}, {money(f?.creditTotal || 0)}. No cash comes in for credit sales until the customer pays.</p>}
               <div>
                 <label className="text-xs font-bold text-slate-400">Cash counted in my drawer ({currency})</label>
                 <input type="number" min="0" step="0.01" inputMode="decimal" placeholder="Count it, then type it" value={countText} onChange={e => setCountText(e.target.value)} className={input + ' text-xl font-mono font-bold'} />
@@ -181,10 +182,16 @@ export default function DrawersView({
 
   // ───────────── OWNER VIEW ─────────────
   // Money taken in the chosen period, by how it was paid (all staff and the owner, refunds already taken off)
-  const moneyBy = { cash: 0, mobile: 0, card: 0 } as Record<string, number>;
+  const moneyBy = { cash: 0, mobile: 0, card: 0, credit: 0 } as Record<string, number>;
   sales.filter(x => x.ts >= from).forEach(x => { const m = x.method || x.paymentMethod || 'cash'; moneyBy[m] = (moneyBy[m] || 0) + (x.total || 0); });
   refunds.filter(x => x.ts >= from).forEach(x => { moneyBy[x.method] = (moneyBy[x.method] || 0) - (x.amount || 0); });
-  const moneyTotal = Object.values(moneyBy).reduce((a, b) => a + b, 0);
+  // credit given is NOT money in. Money collected later from credit customers is, so it is added to how it was paid.
+  const creditSalesN = sales.filter(x => x.ts >= from && (x.method || x.paymentMethod) === 'credit').length;
+  const collectedBy = { cash: 0, mobile: 0, card: 0 } as Record<string, number>;
+  creditPayments.filter(x => x.ts >= from).forEach(x => { collectedBy[x.method] = (collectedBy[x.method] || 0) + (x.amount || 0); });
+  const collectedTotal = collectedBy.cash + collectedBy.mobile + collectedBy.card;
+  const moneyIn = { cash: moneyBy.cash + collectedBy.cash, mobile: moneyBy.mobile + collectedBy.mobile, card: moneyBy.card + collectedBy.card };
+  const moneyTotal = moneyIn.cash + moneyIn.mobile + moneyIn.card;
   const total = records.reduce((a, r) => ({
     counted: a.counted + r.counted, ok: a.ok + r.ok, bad: a.bad + r.bad, short: a.short + r.shortTotal, over: a.over + r.overTotal, noCount: a.noCount + r.noCountDays,
   }), { counted: 0, ok: 0, bad: 0, short: 0, over: 0, noCount: 0 });
@@ -218,6 +225,17 @@ export default function DrawersView({
           {!x.noCount && <span>Counted <b className="font-mono text-slate-200">{money(x.counted)}</b></span>}
         </div>
       )}
+      {!x.open && (
+        <div className="mt-2 pt-2 border-t border-slate-800/70 grid gap-x-4 gap-y-1 text-slate-400" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))' }}>
+          {x.hasSplit ? (<>
+            <span>Cash <b className="font-mono text-slate-200">{money(x.cashSales)}</b></span>
+            <span>Mobile money <b className="font-mono text-slate-200">{money(x.mobileSales)}</b></span>
+            {x.cardSales > 0 && <span>Card <b className="font-mono text-slate-200">{money(x.cardSales)}</b></span>}
+            <span className={x.creditCount > 0 ? 'text-sky-300' : ''}>Credit given <b className="font-mono">{x.creditCount} · {money(x.creditTotal)}</b></span>
+            {x.collected > 0 && <span>Collected from credit <b className="font-mono text-emerald-400">{money(x.collected)}</b></span>}
+          </>) : <span className="text-slate-600">Payment split not recorded (closed before credit existed)</span>}
+        </div>
+      )}
     </div>
   );
 
@@ -237,10 +255,13 @@ export default function DrawersView({
         </div>
 
         <div style={grid}>
-          {kpi('Cash', money(moneyBy.cash), 'text-emerald-400', 'All sales paid in cash')}
-          {kpi('Mobile money', money(moneyBy.mobile), 'text-emerald-400', 'All sales paid by mobile money')}
-          {kpi('Card', money(moneyBy.card), 'text-emerald-400', 'All sales paid by card')}
+          {kpi('Cash', money(moneyIn.cash), 'text-emerald-400', collectedBy.cash > 0 ? `includes ${money(collectedBy.cash)} from credit customers` : 'All sales paid in cash')}
+          {kpi('Mobile money', money(moneyIn.mobile), 'text-emerald-400', collectedBy.mobile > 0 ? `includes ${money(collectedBy.mobile)} from credit customers` : 'All sales paid by mobile money')}
+          {kpi('Card', money(moneyIn.card), 'text-emerald-400', 'All sales paid by card')}
           {kpi('Total money in', money(moneyTotal), 'text-amber-400', 'Cash + mobile + card, after refunds')}
+          {kpi('Credits given', money(moneyBy.credit), 'text-sky-400', `${creditSalesN} credit sale${creditSalesN === 1 ? '' : 's'} · not paid yet`)}
+          {kpi('Credit collected', money(collectedTotal), 'text-emerald-400', 'Paid back by credit customers')}
+          {kpi('Owed to you now', money(creditOwed), creditOwed > 0 ? 'text-amber-400' : 'text-slate-100', 'All credit customers, all time')}
         </div>
 
         <div style={grid}>
@@ -265,6 +286,7 @@ export default function DrawersView({
                     <p className="font-bold text-slate-200 text-sm">{d.staffName}</p>
                     <p className="text-slate-500">Open since {fmtDateTime(d.openedAt)} · {f.salesCount} sale{f.salesCount === 1 ? '' : 's'} · started with {money(d.float)}</p>
                     <p className="text-slate-400">Should have <b className="font-mono text-slate-200">{money(exp)}</b> so far</p>
+                    <p className="text-slate-500">Cash {money(f.cashSales)} · Mobile money {money(f.mobileSales || 0)}{(f.cardSales || 0) > 0 ? ` · Card ${money(f.cardSales || 0)}` : ''} · <span className="text-sky-300">Credit {f.creditCount || 0} · {money(f.creditTotal || 0)}</span>{(f.collectedCash || 0) > 0 ? ` · cash collected from credit ${money(f.collectedCash || 0)}` : ''}</p>
                   </div>
                   <div className="flex items-end gap-2">
                     <input type="number" min="0" step="0.01" inputMode="decimal" placeholder={`Counted (${currency})`} value={ownerCounts[d.staffId] || ''}
@@ -324,6 +346,7 @@ export default function DrawersView({
                           <p className="font-bold text-slate-100 text-sm truncate">{r.name}</p>
                           <p className="text-[11px] text-slate-500">
                             {r.daysWorked} day{r.daysWorked === 1 ? '' : 's'} worked · sold {money(r.salesTotal)}
+                            {r.creditCount > 0 && <span className="text-sky-300"> · {r.creditCount} credit{r.creditCount === 1 ? '' : 's'} {money(r.creditTotal)}</span>}
                             {r.counted > 0 && <> · <span className="text-emerald-400">{r.ok} ✓</span> <span className={r.bad ? 'text-rose-400' : ''}>{r.bad} ✗</span></>}
                             {r.noCountDays > 0 && <span className="text-amber-400"> · {r.noCountDays} not counted</span>}
                           </p>
@@ -345,7 +368,7 @@ export default function DrawersView({
               })}
             </div>
           )}
-          <p className="text-[11px] text-slate-600">Sales by the owner are not counted here. Shortage = cash counted minus the cash that should be there (start cash + cash sales − cash refunds − cash paid out of the till).</p>
+          <p className="text-[11px] text-slate-600">Sales by the owner are not counted here. Shortage = cash counted minus the cash that should be there (start cash + cash sales + cash collected from credit customers − cash refunds − cash paid out of the till). Credit sales bring no cash in, so they never cause a shortage.</p>
         </div>
       </div>
     </div>

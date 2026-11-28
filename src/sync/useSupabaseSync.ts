@@ -3,6 +3,7 @@ import type { Session } from '@supabase/supabase-js';
 import { supabase } from './supabase';
 import { usePersistentState } from '../storage';
 import { EMPTY_BUSINESS } from '../brand';
+import { DEFAULT_POLICY } from '../credits';
 import { syncMutableRecords } from './mutableSync';
 import { uid } from '../auth/crypto';
 import { deriveMoves, mergePulled, pickStock, sig, sigOfJson, sumPending } from './stockMerge';
@@ -22,9 +23,10 @@ import { deriveMoves, mergePulled, pickStock, sig, sigOfJson, sumPending } from 
  * Runs on sign-in, every 30 s, when the network returns, and right after each sale/shift is queued.
  * Offline = every step is skipped and retried later; nothing is lost.
  */
-export function useSupabaseSync({ outbox, setOutbox, products, setProducts, collections, tabs, setTabs, business, setBusiness, storeId, workspace }: {
+export function useSupabaseSync({ outbox, setOutbox, products, setProducts, collections, tabs, setTabs, business, setBusiness, credit, storeId, workspace }: {
   outbox: any[]; setOutbox: any; products: any[]; setProducts: any; collections: Record<string, any>;
   tabs: any[]; setTabs: any; business: any; setBusiness: any; // open bar tabs and the business details are synced too
+  credit: { customers: any[]; setCustomers: any; policy: any; setPolicy: any }; // credit customers (with limits) and the credit rules
   storeId: string;   // e.g. bar-main-bar / bar-main-retail: Bar and Retail never mix on the server
   workspace: string;
 }) {
@@ -43,7 +45,7 @@ export function useSupabaseSync({ outbox, setOutbox, products, setProducts, coll
 
   // Always-fresh copies so the (stable) sync function never reads stale state.
   const ref = useRef<any>({});
-  ref.current = { outbox, products, hashes, lastPull, session, cursors, collections, tabs, business, mut, ledger };
+  ref.current = { outbox, products, hashes, lastPull, session, cursors, collections, tabs, business, credit, mut, ledger };
   const running = useRef(false);
   const stockTableOk = useRef(false);
 
@@ -66,7 +68,7 @@ export function useSupabaseSync({ outbox, setOutbox, products, setProducts, coll
         } else if (/^(22|23)/.test((err as any).code || '')) {
           setOutbox((p: any[]) => p.map(o => (o.id === item.id ? { ...o, failed: true } : o))); // bad data: park it
         } else if (['42P01', 'PGRST205'].includes((err as any).code)) {
-          setError(`Table "${table}" is missing in Supabase. Run the files in supabase/migrations/ (2_stock_log.sql, 3_expenses.sql, 4_refunds.sql, 7_staff_drawers.sql).`);
+          setError(`Table "${table}" is missing in Supabase. Run the files in supabase/migrations/ (2_stock_log.sql, 3_expenses.sql, 4_refunds.sql, 7_staff_drawers.sql, 8_credit.sql).`);
           continue; // leave it queued, but don't hold up sales behind it
         } else {
           throw err; // auth/network/server problem: stop, retry later (order preserved)
@@ -101,9 +103,9 @@ export function useSupabaseSync({ outbox, setOutbox, products, setProducts, coll
 
       // 1b. PULL what OTHER devices recorded (sales, closed shifts, deliveries), so the owner sees the bar and the
       //     retail store together. Rows are matched by id, so our own uploads coming back change nothing.
-      const sortKey: Record<string, string> = { sales: 'ts', closed_shifts: 'closedAt', stock_log: 'ts', expenses: 'ts', refunds: 'ts', drawers: 'ts' };
+      const sortKey: Record<string, string> = { sales: 'ts', closed_shifts: 'closedAt', stock_log: 'ts', expenses: 'ts', refunds: 'ts', drawers: 'ts', credit_payments: 'ts' };
       const nextCursors: Record<string, string> = { ...ref.current.cursors };
-      for (const table of ['sales', 'closed_shifts', 'stock_log', 'expenses', 'refunds', 'drawers']) {
+      for (const table of ['sales', 'closed_shifts', 'stock_log', 'expenses', 'refunds', 'drawers', 'credit_payments']) {
         let c: string = nextCursors[table] || new Date(Date.now() - 60 * 86400000).toISOString(); // first pull: last 60 days
         for (;;) {
           const { data, error: err } = await supabase.from(table).select('id, payload, received_at')
@@ -175,9 +177,21 @@ export function useSupabaseSync({ outbox, setOutbox, products, setProducts, coll
           inc.forEach(r => m.set(r.id, r.data));
           return Array.from(m.values()).sort((a: any, b: any) => (b.openedTs || 0) - (a.openedTs || 0));
         }), true);
-      await runMutable('settings', 'settings', [{ id: 'business', data: ref.current.business }],
-        d => JSON.stringify(d) === JSON.stringify(EMPTY_BUSINESS),            // never typed on this device yet: take the cloud copy, don't overwrite it
-        inc => { const b = inc.find(r => r.id === 'business'); if (b) setBusiness(b.data); }, false);
+      // Settings rows: the business details, the credit rules ('credit-rules') and one row per credit customer ('cc:<id>').
+      const cr = ref.current.credit || { customers: [], policy: DEFAULT_POLICY };
+      await runMutable('settings', 'settings',
+        [{ id: 'business', data: ref.current.business }, { id: 'credit-rules', data: cr.policy }, ...(cr.customers || []).map((c: any) => ({ id: `cc:${c.id}`, data: c }))],
+        d => (d?.kind === 'cust' ? false : d?.kind === 'cpol' ? JSON.stringify(d) === JSON.stringify(DEFAULT_POLICY) : JSON.stringify(d) === JSON.stringify(EMPTY_BUSINESS)), // never typed on this device yet: take the cloud copy, don't overwrite it
+        inc => {
+          const b = inc.find(r => r.id === 'business'); if (b) setBusiness(b.data);
+          const pol = inc.find(r => r.id === 'credit-rules'); if (pol) ref.current.credit?.setPolicy(pol.data);
+          const cu = inc.filter(r => r.id.startsWith('cc:'));
+          if (cu.length) ref.current.credit?.setCustomers((prev: any[]) => {
+            const m = new Map(prev.map(c => [c.id, c]));
+            cu.forEach(r => m.set(r.data.id, r.data));
+            return Array.from(m.values());
+          });
+        }, false);
       setMut(mutNext);
       if (mutProblem) setError(mutProblem);
       setHashes(nextHashes);
@@ -212,7 +226,7 @@ export function useSupabaseSync({ outbox, setOutbox, products, setProducts, coll
   }, [session, syncNow]);
   useEffect(() => { syncNow(); }, [outbox.length]);
   // an open tab or the business details changed: upload soon (a short delay groups quick edits together)
-  const mutKey = JSON.stringify(tabs) + JSON.stringify(business);
+  const mutKey = JSON.stringify(tabs) + JSON.stringify(business) + JSON.stringify(credit?.customers || []) + JSON.stringify(credit?.policy || {});
   useEffect(() => { const t = setTimeout(syncNow, 1500); return () => clearTimeout(t); }, [mutKey]);
 
   const pending = outbox.filter(o => !o.failed).length + ((ledger?.moves as any[])?.length || 0);

@@ -57,10 +57,11 @@ const Big = ({ label, value, tone, note }: { label: string; value: string; tone:
 
 // Where is the money? Cash is in the drawer; mobile money is on the phone; card is in the bank.
 const Where = ({ r, money }: { r: any; money: (n: any) => string }) => (
-  <div className="grid grid-cols-3 gap-2 text-center">
+  <div className={`grid ${r.byMethod.credit ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-3'} gap-2 text-center`}>
     <div className="bg-slate-900 rounded-xl p-2"><p className="text-[11px] text-slate-500 font-bold">CASH</p><p className="font-mono text-sm font-bold text-slate-100">{money(r.byMethod.cash)}</p><p className="text-[10px] text-amber-400 font-bold mt-0.5">in the drawer</p></div>
     <div className="bg-slate-900 rounded-xl p-2"><p className="text-[11px] text-slate-500 font-bold">MOBILE MONEY</p><p className="font-mono text-sm font-bold text-slate-100">{money(r.byMethod.mobile)}</p><p className="text-[10px] text-slate-500 mt-0.5">on the phone</p></div>
     <div className="bg-slate-900 rounded-xl p-2"><p className="text-[11px] text-slate-500 font-bold">CARD</p><p className="font-mono text-sm font-bold text-slate-100">{money(r.byMethod.card)}</p><p className="text-[10px] text-slate-500 mt-0.5">in the bank</p></div>
+    {!!r.byMethod.credit && <div className="bg-slate-900 rounded-xl p-2"><p className="text-[11px] text-slate-500 font-bold">ON CREDIT</p><p className="font-mono text-sm font-bold text-sky-300">{money(r.byMethod.credit)}</p><p className="text-[10px] text-sky-400 mt-0.5">not paid yet{r.credit?.count ? ` · ${r.credit.count} sale${r.credit.count === 1 ? '' : 's'}` : ''}</p></div>}
   </div>
 );
 
@@ -131,7 +132,8 @@ export default function MoneySimple({ r, money, heading }: Props) {
         {r.refundTotal > 0 && <Line label="Money given back" hint="Refunds to customers" value={money(r.refundTotal)} tone="text-rose-400" sign="-" />}
         <Line label="Total sales" value={money(r.netSales)} tone="text-emerald-400" bold />
         <div className="pt-2"><Where r={r} money={money} /></div>
-        <p className="text-[12px] text-slate-500 pt-2">Only the <b className="text-slate-300">cash</b> is in the drawer. Mobile money is on the phone. Card money is in the bank.</p>
+        <p className="text-[12px] text-slate-500 pt-2">Only the <b className="text-slate-300">cash</b> is in the drawer. Mobile money is on the phone. Card money is in the bank.{!!r.byMethod.credit && <> <b className="text-sky-300">Credit</b> is sold but not paid yet: the customer still owes it.</>}</p>
+        {r.credit?.collected?.total > 0 && <Line label="Collected from credit customers" hint={`Paid back during this shift: cash ${money(r.credit.collected.cash)}, mobile ${money(r.credit.collected.mobile)}${r.credit.collected.card ? `, card ${money(r.credit.collected.card)}` : ''}`} value={money(r.credit.collected.total)} tone="text-emerald-400" sign="+" />}
       </Step>
 
       <Step n={2} title="Spending: money you paid out">
@@ -154,6 +156,7 @@ export default function MoneySimple({ r, money, heading }: Props) {
       <Step n={4} title="Cash in the drawer: is it correct?">
         <Line label="Cash at the start" hint="The money the drawer started with" value={money(r.cash.float)} />
         <Line label="Cash from sales" value={money(r.cash.sales)} tone="text-emerald-400" sign="+" />
+        {r.cash.collected > 0 && <Line label="Cash collected from credit customers" hint="Debts paid back in cash" value={money(r.cash.collected)} tone="text-emerald-400" sign="+" />}
         <Line label="Cash taken out to pay for things" hint="Money taken from the drawer" value={money(r.cash.tillOut)} tone="text-rose-400" sign="-" />
         <Line label="Cash that SHOULD be there" value={money(r.cash.expected)} bold />
         <Line label="Cash you COUNTED" value={counted == null ? 'not counted' : money(counted)} bold />

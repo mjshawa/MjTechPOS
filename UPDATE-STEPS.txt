@@ -1,37 +1,78 @@
-UPDATE: Staff Drawers + simple money screens
-=============================================
+UPDATE: Customer credit (sell now, pay later) + automatic stock count   (for bar-pos-app (111))
+=======================================================================================
 This folder holds ONLY the files that changed. Copy them over your bar-pos-app folder (same paths).
-It does NOT contain .env, node_modules, .git, or any customer data, so nothing of the client's is touched.
+It does NOT contain .env, node_modules, .git, or any customer data. It already includes the earlier
+"automatic stock count on staff shift close" change, so you do NOT need the previous update zip as well.
 
-STEP 0  Safety (2 minutes)
+WHAT IS NEW
+  1. Automatic stock count on staff shift close (no typing a count for every item).
+  2. CREDIT at the till: a 4th payment button (Cash / Mobile / Card / Credit).
+       - Staff pick an APPROVED credit customer, optional "pay by" date and note.
+       - Staff cannot go over the customer's limit or sell to a blocked customer. The owner can override.
+       - It is a normal sale (stock goes down, it counts in sales) but NO money comes in, so it never
+         touches the cash drawer and never causes a "short" drawer.
+  3. New "Credits" tab (owner and staff):
+       - Owner: add customers, set each limit (empty = no limit), block / allow, set the credit rules
+         (may staff add new customers? default limit for those), cancel a wrong payment.
+       - Staff: see who owes what, add a customer only if the owner allows it, and RECEIVE PAYMENT
+         (full or part). Cash received goes into that staff member's drawer for that shift;
+         mobile money / card are recorded separately. Payments are matched to the oldest unpaid sale first.
+       - Shows total owed, overdue, credit given this shift, collected this shift.
+  4. Owner > Staff Drawers now shows, for every staff member and every shift (drawer):
+       Cash | Mobile money | Card | Credit given (number + total) | Collected from credit customers
+     plus totals at the top: Credits given, Credit collected, Owed to you now.
+     Drawers closed before this update show "Payment split not recorded" for the split.
+  5. Shift records / End of Day / Excel export / receipts / refunds understand credit:
+       - Shift record: On credit line, collected from credit customers, credit given per cashier,
+         credit payments table.
+       - Refunding a credit sale takes the amount off what the customer owes (no money paid out).
+       - Excel gets two new sheets: "Credit Sales" and "Credit Payments".
+
+FILES (replace or add, same paths)
+  src/App.tsx                 replaced
+  src/drawers.ts              replaced
+  src/DrawersView.tsx         replaced
+  src/MoneySimple.tsx         replaced
+  src/ShiftRecordModal.tsx    replaced
+  src/SalesView.tsx           replaced
+  src/MySalesView.tsx         replaced
+  src/ReprintView.tsx         replaced
+  src/printReport.ts          replaced
+  src/exportExcel.ts          replaced
+  src/sync/useSupabaseSync.ts replaced
+  src/credits.ts              NEW
+  src/CreditsView.tsx         NEW
+  supabase/migrations/8_credit.sql   NEW
+  supabase/schema.sql         replaced (only adds the credit_payments table; for new installs)
+
+STEP 0  Safety
   cd bar-pos-app
-  git add -A && git commit -m "backup before staff drawers"     (your project already uses git)
-  In the live app: Owner > export / backup if available. In Supabase: Database > Backups (or Table editor > export).
+  git add -A && git commit -m "backup before credit"
 
-STEP 1  Copy the files in this folder into bar-pos-app (say Yes to "replace"):
-  src/App.tsx                       replaced (newer version of your file)
-  src/exportExcel.ts                replaced (small change)
-  src/sync/useSupabaseSync.ts       replaced (small change: also syncs "drawers")
-  src/DrawersView.tsx               NEW
-  src/MoneySimple.tsx               NEW
-  src/ReprintView.tsx               NEW
-  src/ShiftRecordModal.tsx          NEW
-  src/drawers.ts                    NEW
-  supabase/migrations/7_staff_drawers.sql   NEW
-  supabase/schema.sql               replaced (only adds the drawers table; for new installs)
-  (README.md is NOT included. Keep yours.)
+STEP 1  Copy everything in this folder into bar-pos-app (say Yes to replace).
 
 STEP 2  Supabase: add the new table (do this BEFORE going live)
-  Supabase > SQL Editor > paste the whole of supabase/migrations/7_staff_drawers.sql > Run.
-  It uses "create table if not exists", so it only ADDS a table. It never deletes or changes existing data.
+  Supabase > SQL Editor > paste the whole of supabase/migrations/8_credit.sql > Run.
+  It only ADDS one table (credit_payments). It never changes or deletes existing data.
+  Credit customers and their limits sync through your existing "settings" table, so nothing else is needed.
+  (Until the table exists, credit payments stay safely queued on the device and sync later.)
 
 STEP 3  Test, then deploy
   npm run build            (must finish with no errors)
-  npm run preview          (quick look: End of Day and Closed Shifts)
-  git add -A && git commit -m "staff drawers + simple money" && git push     (or your usual wrangler deploy)
+  npm run preview
+    - Owner: Credits > Add credit customer (limit e.g. 100)
+    - Staff: open My Drawer, sell something on Credit to that customer, try going over the limit (it must stop)
+    - Staff: Credits > open the customer > Receive payment (cash) > the drawer should expect that cash
+    - Owner: Staff Drawers > the staff member > see Cash / Mobile / Credit given
+  git add -A && git commit -m "customer credit + auto stock count" && git push   (or your usual wrangler deploy)
 
 STEP 4  On the shop devices
-  Open the app. A "New version ready" banner appears. Tap Update when no sale is in progress.
+  Tap Update on the "New version ready" banner when no sale is in progress.
   Do NOT clear browser data and do NOT uninstall the app.
 
-IF SOMETHING GOES WRONG: git revert HEAD (or redeploy the previous commit). Data is unaffected either way.
+NOTES
+  - Credit customers are kept per workspace (Bar and Wholesale each have their own list and balances).
+  - Credit never counts as cash. "Total money in" on Staff Drawers = cash + mobile + card actually received.
+    Profit still counts a credit sale when it is made (it is a real sale); the customer simply still owes it.
+
+IF SOMETHING GOES WRONG: git revert HEAD. Data is unaffected either way.

@@ -16,7 +16,7 @@ const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 
 const WEEK = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const compact = (n: number) => (n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : n.toFixed(0));
 const methodOf = (s: any) => s.method || s.paymentMethod || 'cash';
-const METHOD_LABEL: Record<string, string> = { cash: 'Cash', mobile: 'Mobile money', card: 'Card' };
+const METHOD_LABEL: Record<string, string> = { cash: 'Cash', mobile: 'Mobile money', card: 'Card', credit: 'On credit' };
 
 export default function MySalesView({ sales, user, refundsBySale, money, fmtDateTime, currency }: {
   sales: any[]; user: { id: string; name: string }; refundsBySale: Map<string, number>;

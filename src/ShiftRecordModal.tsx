@@ -18,7 +18,7 @@ type Props = {
 
 const esc = (v: any) => String(v ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
 const neg = (n: number) => (n < 0 ? 'text-rose-400' : 'text-emerald-400');
-const methodName = (m: string) => (m === 'mobile' ? 'Mobile money' : m === 'card' ? 'Card' : m === 'cash' ? 'Cash' : m || '-');
+const methodName = (m: string) => (m === 'mobile' ? 'Mobile money' : m === 'card' ? 'Card' : m === 'cash' ? 'Cash' : m === 'credit' ? 'On credit' : m || '-');
 
 export function buildShiftRecordHtml(r: any, title: string, money: Props['money'], fmt: Props['fmtDateTime']): string {
   const row = (cells: any[], head = false) => `<tr>${cells.map((c, i) => `<${head ? 'th' : 'td'}${i > 0 && !head && typeof c === 'string' && /^[-\u2212]?[A-Z]{2,4} [\d,.]+$|^[\d,.]+$/.test(c) ? ' class="r"' : ''}>${esc(c)}</${head ? 'th' : 'td'}>`).join('')}</tr>`;
@@ -34,6 +34,8 @@ export function buildShiftRecordHtml(r: any, title: string, money: Props['money'
     ['Refunds', `-${money(r.refundTotal)} (${r.refundCount})`],
     ['NET SALES', money(r.netSales)],
     ['   Cash', money(r.byMethod.cash)], ['   Mobile money', money(r.byMethod.mobile)], ['   Card', money(r.byMethod.card)],
+    ['   On credit (not paid yet)', `${money(r.byMethod.credit || 0)} (${r.credit?.count || 0} sale${r.credit?.count === 1 ? '' : 's'})`],
+    ['Collected from credit customers', money(r.credit?.collected?.total || 0)],
     ['Cost of goods sold', `-${money(r.cogs)}`],
     ['GROSS PROFIT', money(r.grossProfit)],
     ['Expenses', `-${money(r.expenseTotal)}`],
@@ -41,16 +43,17 @@ export function buildShiftRecordHtml(r: any, title: string, money: Props['money'
     ['NET PROFIT', money(r.netProfit)],
   ])));
   parts.push(sec('Cash drawer', kv([
-    ['Opening float', money(r.cash.float)], ['Cash sales (after cash refunds)', money(r.cash.sales)], ['Paid out of the till', `-${money(r.cash.tillOut)}`],
+    ['Opening float', money(r.cash.float)], ['Cash sales (after cash refunds)', money(r.cash.sales)], ['Cash collected from credit customers', money(r.cash.collected || 0)], ['Paid out of the till', `-${money(r.cash.tillOut)}`],
     ['Cash expected', money(r.cash.expected)], ['Cash counted', r.cash.counted == null ? 'not counted' : money(r.cash.counted)],
     ['Difference', r.cash.variance == null ? '-' : r.cash.variance === 0 ? 'correct' : r.cash.variance < 0 ? `missing ${money(Math.abs(r.cash.variance))}` : `extra ${money(r.cash.variance)}`],
   ])));
   parts.push(sec('Expenses', r.expenses.length ? table(['Time', 'Category', 'Paid to / note', 'Paid from', 'By', 'Amount'], r.expenses.map((e: any) => [fmt(e.ts), e.category, [e.payee, e.note].filter(Boolean).join(' · ') + (e.afterClose ? ' (added after close)' : ''), e.paidFromLabel, e.by || '', money(e.amount)])) : '<p>No expenses.</p>'));
   if (r.stockBuys.length) parts.push(sec('Stock bought with till cash (not an expense)', table(['Time', 'Supplier', 'Note', 'By', 'Amount'], r.stockBuys.map((e: any) => [fmt(e.ts), e.payee || '', e.note || '', e.by || '', money(e.amount)]))));
   parts.push(sec('Items sold', r.items.length ? table(['Item', 'Qty', 'Bottles/units out', 'Sales', 'Cost', 'Profit'], r.items.map((i: any) => [i.name, i.qty, i.bottles, money(i.revenue), money(i.cost), money(i.revenue - i.cost)])) : '<p>Nothing sold.</p>'));
-  parts.push(sec('By cashier', r.staff.length ? table(['Cashier', 'Sales', 'Total', 'Cash', 'Mobile money', 'Card'], r.staff.map((s: any) => [s.name, s.count, money(s.total), money(s.cash), money(s.mobile), money(s.card)])) : '<p>No sales.</p>'));
+  parts.push(sec('By cashier', r.staff.length ? table(['Cashier', 'Sales', 'Total', 'Cash', 'Mobile money', 'Card', 'Credit given'], r.staff.map((s: any) => [s.name, s.count, money(s.total), money(s.cash), money(s.mobile), money(s.card), `${s.creditCount || 0} · ${money(s.credit || 0)}`])) : '<p>No sales.</p>'));
   if (r.refundRows.length) parts.push(sec('Refunds', table(['Time', 'Receipt', 'Method', 'Reason', 'By', 'Amount'], r.refundRows.map((x: any) => [fmt(x.ts), x.txId || '', methodName(x.method), x.reason || '', x.by || '', `-${money(x.amount)}`]))));
-  if (r.drawers.length) parts.push(sec('Staff drawers', table(['Staff', 'Float', 'Sales', 'Cash sales', 'Expected', 'Counted', 'Difference'], r.drawers.map((d: any) => [d.staffName, money(d.float), d.salesCount, money(d.cashSales), money(d.expected), money(d.counted), money(d.variance)]))));
+  if (r.drawers.length) parts.push(sec('Staff drawers', table(['Staff', 'Float', 'Sales', 'Cash sales', 'Mobile money', 'Credit given', 'Cash from credit', 'Expected', 'Counted', 'Difference'], r.drawers.map((d: any) => [d.staffName, money(d.float), d.salesCount, money(d.cashSales), d.mobileSales === undefined ? '-' : money(d.mobileSales), d.creditCount === undefined ? '-' : `${d.creditCount} · ${money(d.creditTotal || 0)}`, money(d.collectedCash || 0), money(d.expected), money(d.counted), money(d.variance)]))));
+  if (r.credit?.payments?.length) parts.push(sec('Credit payments received', table(['Time', 'Customer', 'Method', 'Received by', 'Note', 'Amount'], r.credit.payments.map((x: any) => [fmt(x.ts), x.customerName || '', methodName(x.method), x.by || '', x.note || '', money(x.amount)]))));
   if (r.stock) parts.push(sec('Stock count at close', table(['Item', 'At start', 'Sold', 'Expected', 'Counted', 'Difference'], r.stock.map((p: any) => [p.name, p.start, p.sold, p.expected, p.actual, p.actual - p.expected]))));
   if (r.tabsOpen) parts.push(`<p>Open tabs left at close: ${r.tabsOpen.count} (${esc(money(r.tabsOpen.total))}). Their items were already taken out of stock.</p>`);
   parts.push(sec('Every sale', r.sales.length ? table(['Time', 'Receipt', 'Customer', 'Cashier', 'Paid by', 'Items', 'Total'], r.sales.map((s: any) => [fmt(s.ts), s.txId || '', s.customer || '', s.cashier || '', methodName(s.method || s.paymentMethod), (s.items || []).map((i: any) => `${i.qty}x ${i.name}${i.variant ? ` (${i.variant})` : ''}`).join(', '), money(s.total)])) : '<p>No sales.</p>'));
@@ -122,8 +125,8 @@ export default function ShiftRecordModal({ report: r, title, money, fmtDateTime,
 
         <Section title="By cashier">
           {r.staff.length === 0 ? <p className="text-xs text-slate-500">No sales.</p> : (
-            <Table head={['Cashier', 'Sales', 'Total', 'Cash', 'Mobile money', 'Card']}
-              rows={r.staff.map((s: any) => [s.name, s.count, <span className="font-mono">{money(s.total)}</span>, <span className="font-mono">{money(s.cash)}</span>, <span className="font-mono">{money(s.mobile)}</span>, <span className="font-mono">{money(s.card)}</span>])} />
+            <Table head={['Cashier', 'Sales', 'Total', 'Cash', 'Mobile money', 'Card', 'Credit given']}
+              rows={r.staff.map((s: any) => [s.name, s.count, <span className="font-mono">{money(s.total)}</span>, <span className="font-mono">{money(s.cash)}</span>, <span className="font-mono">{money(s.mobile)}</span>, <span className="font-mono">{money(s.card)}</span>, <span className="font-mono text-sky-300">{s.creditCount || 0} · {money(s.credit || 0)}</span>])} />
           )}
         </Section>
 
@@ -136,8 +139,15 @@ export default function ShiftRecordModal({ report: r, title, money, fmtDateTime,
 
         {r.drawers.length > 0 && (
           <Section title="Staff drawers">
-            <Table head={['Staff', 'Float', 'Sales', 'Cash sales', 'Expected', 'Counted', 'Difference']}
-              rows={r.drawers.map((d: any) => [d.staffName, money(d.float), d.salesCount, money(d.cashSales), money(d.expected), money(d.counted), <span className={d.variance === 0 ? 'text-emerald-400' : d.variance < 0 ? 'text-rose-400' : 'text-amber-400'}>{money(d.variance)}</span>])} />
+            <Table head={['Staff', 'Float', 'Sales', 'Cash sales', 'Mobile money', 'Credit given', 'Cash from credit', 'Expected', 'Counted', 'Difference']}
+              rows={r.drawers.map((d: any) => [d.staffName, money(d.float), d.salesCount, money(d.cashSales), d.mobileSales === undefined ? '-' : money(d.mobileSales), d.creditCount === undefined ? '-' : `${d.creditCount} · ${money(d.creditTotal || 0)}`, money(d.collectedCash || 0), money(d.expected), money(d.counted), <span className={d.variance === 0 ? 'text-emerald-400' : d.variance < 0 ? 'text-rose-400' : 'text-amber-400'}>{money(d.variance)}</span>])} />
+          </Section>
+        )}
+
+        {r.credit?.payments?.length > 0 && (
+          <Section title="Credit payments received">
+            <Table head={['Time', 'Customer', 'Method', 'Received by', 'Note', 'Amount']}
+              rows={r.credit.payments.map((x: any) => [fmtDateTime(x.ts), x.customerName || '', methodName(x.method), x.by || '', x.note || '', <span className="font-mono text-emerald-400">{money(x.amount)}</span>])} />
           </Section>
         )}
 

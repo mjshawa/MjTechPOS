@@ -10,7 +10,7 @@ type Opts = { currency: string; businessName: string; exportedBy: string; staffN
 
 const WORKSPACES: [string, string][] = [['bar', 'Bar'], ['retail', 'Wholesale']];
 const r2 = (n: any) => Math.round((Number(n) || 0) * 100) / 100;
-const PAY: Record<string, string> = { cash: 'Cash', mobile: 'Mobile money', card: 'Card' };
+const PAY: Record<string, string> = { cash: 'Cash', mobile: 'Mobile money', card: 'Card', credit: 'On credit' };
 const payLabel = (m: any) => PAY[m] || String(m || '');
 const dayOf = (ts: number) => { const d = new Date(ts); return new Date(d.getFullYear(), d.getMonth(), d.getDate()); };
 
@@ -28,6 +28,7 @@ export async function downloadExcel(o: Opts) {
   // ---------- gather ----------
   type Row = any;
   const sales: Row[] = [], items: Row[] = [], refunds: Row[] = [], expenses: Row[] = [], shifts: Row[] = [], stock: Row[] = [], products: Row[] = [];
+  const creditSales: Row[] = [], creditPays: Row[] = [];
   const staffSet = new Set<string>((o.staffNames || []).filter(Boolean));
 
   for (const [wsId, wsName] of WORKSPACES) {
@@ -37,6 +38,12 @@ export async function downloadExcel(o: Opts) {
     const C = readCollection(`${wsId}:closedShifts`).sort((a, b) => a.openedAt - b.openedAt);
     const L = readCollection(`${wsId}:stockLog`).sort((a, b) => a.ts - b.ts);
     const P = readCollection(`${wsId}:products`);
+
+    // customer credit: every credit sale, and the money received later (a cancelled payment stays listed, marked Cancelled)
+    const CP = readCollection(`${wsId}:creditPayments`).sort((a, b) => a.ts - b.ts);
+    const goneCp = new Set(CP.filter(x => x.kind === 'void').map(x => x.voidOf));
+    CP.filter(x => x.kind === 'creditpay').forEach(x => creditPays.push({ ws: wsName, dt: new Date(x.ts), customer: x.customerName || '', amount: r2(x.amount), method: payLabel(x.method), by: x.by || '', note: x.note || '', status: goneCp.has(x.id) ? 'Cancelled' : 'Active' }));
+    S.filter(s => (s.method || s.paymentMethod) === 'credit').forEach(s => creditSales.push({ ws: wsName, dt: new Date(s.ts), tx: s.txId, customer: s.credit?.customerName || s.customer || '', soldBy: s.cashier || '', total: r2(s.total ?? s.grandTotal), due: s.credit?.dueDate || '', note: s.credit?.note || '' }));
 
     const refundedBySale = new Map<string, number>();
     R.forEach(x => refundedBySale.set(x.saleId, (refundedBySale.get(x.saleId) || 0) + (x.amount || 0)));
@@ -225,6 +232,16 @@ export async function downloadExcel(o: Opts) {
     wsDays.getCell(`M${r}`).value = { formula: `D${r}-I${r}-K${r}-L${r}`, result: x.profit };
   });
 
+  // ---------- Customer credit ----------
+  make('Credit Sales', [
+    { h: 'Workspace', k: 'ws', w: 12 }, { h: 'Date & time', k: 'dt', w: 18, f: DT }, { h: 'Receipt no.', k: 'tx', w: 11 }, { h: 'Customer', k: 'customer', w: 22 },
+    { h: 'Sold by', k: 'soldBy', w: 18 }, { h: `Amount (${K})`, k: 'total', w: 13, f: MONEY }, { h: 'Pay by', k: 'due', w: 12 }, { h: 'Note', k: 'note', w: 30 },
+  ], creditSales);
+  make('Credit Payments', [
+    { h: 'Workspace', k: 'ws', w: 12 }, { h: 'Date & time', k: 'dt', w: 18, f: DT }, { h: 'Customer', k: 'customer', w: 22 }, { h: `Amount (${K})`, k: 'amount', w: 13, f: MONEY },
+    { h: 'Paid by', k: 'method', w: 14 }, { h: 'Received by', k: 'by', w: 18 }, { h: 'Note', k: 'note', w: 30 }, { h: 'Status (ignore "Cancelled")', k: 'status', w: 14 },
+  ], creditPays);
+
   // ---------- Refunds ----------
   make('Refunds', [
     { h: 'Workspace', k: 'ws', w: 12 }, { h: 'Date & time', k: 'dt', w: 18, f: DT }, { h: 'Receipt no.', k: 'tx', w: 11 }, { h: 'Issued by', k: 'issuedBy', w: 18 },
@@ -295,7 +312,7 @@ export async function downloadExcel(o: Opts) {
   const rowTotal = line('Number of sales', ws => ({ f: `COUNTIFS(Sales!$A$2:$A$${sN2},"${ws}")`, v: inWs(sales, ws).length }));
   sm.getCell(`B${rowTotal}`).numFmt = '0'; sm.getCell(`C${rowTotal}`).numFmt = '0'; sm.getCell(`D${rowTotal}`).numFmt = '0';
   const rSold = line('Total sold', ws => ({ f: `SUMIFS(Sales!$M$2:$M$${sN2},Sales!$A$2:$A$${sN2},"${ws}")`, v: sumArr(inWs(sales, ws), 'total') }));
-  ['Cash', 'Mobile money', 'Card'].forEach(m => line(`   of which ${m}`, ws => ({ f: `SUMIFS(Sales!$M$2:$M$${sN2},Sales!$A$2:$A$${sN2},"${ws}",Sales!$G$2:$G$${sN2},"${m}")`, v: sumArr(inWs(sales, ws).filter(s => s.method === m), 'total') })));
+  ['Cash', 'Mobile money', 'Card', 'On credit'].forEach(m => line(`   of which ${m}${m === 'On credit' ? ' (not paid yet)' : ''}`, ws => ({ f: `SUMIFS(Sales!$M$2:$M$${sN2},Sales!$A$2:$A$${sN2},"${ws}",Sales!$G$2:$G$${sN2},"${m}")`, v: sumArr(inWs(sales, ws).filter(s => s.method === m), 'total') })));
   const rDisc = line('Discounts given (already taken off)', ws => ({ f: `SUMIFS(Sales!$K$2:$K$${sN2},Sales!$A$2:$A$${sN2},"${ws}")`, v: sumArr(inWs(sales, ws), 'discount') }));
   void rDisc;
   const rRef = line('Refunds', ws => ({ f: `SUMIFS(Refunds!$G$2:$G$${rN},Refunds!$A$2:$A$${rN},"${ws}")`, v: sumArr(inWs(refunds, ws), 'amount') }));
